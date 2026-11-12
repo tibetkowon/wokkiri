@@ -38,7 +38,7 @@ def clean(name):
 
 def find(state, name):
     key = clean(name).casefold() if isinstance(name, str) else ''
-    return next((u for u, v in state['users'].items() if v['name'].casefold() == key), None)
+    return next((u for u, v in state['users'].items() if clean(v['name']).casefold() == key), None)
 
 
 def _new(state, uid, name, pin):

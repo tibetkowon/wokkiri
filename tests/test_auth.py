@@ -32,6 +32,11 @@ class Accounts(unittest.TestCase):
         with self.assertRaises(RuleError):
             auth.signup(self.state, '​​', '1234')
         self.assertEqual(auth.login(self.state, 'ＴＯＭ', '1234', NOW), auth.find(self.state, 'Tom'))
+        # 정규화 도입 전에 저장된 이름도 같은 규칙으로 찾고, 같은 이름으로 다시 가입하지 못합니다.
+        self.state['users']['ga']['name'] = '가​람'
+        self.assertEqual(auth.find(self.state, '가람'), 'ga')
+        with self.assertRaises(RuleError):
+            auth.signup(self.state, '가람', '5555')
 
     def test_login_and_lockout(self):
         self.assertEqual(auth.login(self.state, '가람', '1111', NOW), 'ga')
