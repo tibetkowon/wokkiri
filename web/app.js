@@ -1,6 +1,9 @@
 const $ = s => document.querySelector(s);
 const e = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let state, selected = null, tab = 'ranking', roundId = null, timer;
+// 초대 링크(/?join=코드)로 들어왔는지, 로그인 화면의 모드, 방금 만든 PIN 초기화 코드입니다.
+const inviteToken = new URLSearchParams(location.search).get('join');
+let invite = null, authMode = inviteToken ? 'signup' : 'login', resetInfo = null;
 // 새 리그 달력: 날짜는 (요일이 켜짐) XOR (개별로 뒤집음)일 때 선택입니다.
 let weekdaysOn = new Set([1, 2, 3, 4, 5]), flipped = new Set();
 let pick = null;
@@ -44,7 +47,41 @@ async function api(path, data) {
 
 async function load() {
   state = await api('/api/state');
+  if (inviteToken && invite === null) {
+    invite = await api('/api/invite?t=' + encodeURIComponent(inviteToken)).catch(() => false);
+    if (!invite) notify('초대 링크가 올바르지 않아요. 보내 준 친구에게 다시 물어봐 주세요.');
+  }
+  if (inviteToken && invite && state.actor) await enterInvited();
   render();
+}
+
+// 초대 링크로 들어온 로그인 회원은 그 리그에 넣고 바로 열어 줍니다. 한 번만 처리합니다.
+async function enterInvited() {
+  try {
+    let l = state.leagues.find(x => x.invite === inviteToken);
+    if (!l) {
+      const joined = await api('/api/action', {action:'join', invite:inviteToken});
+      state = await api('/api/state');
+      l = state.leagues.find(x => x.id === joined.league);
+    }
+    selected = l.id; tab = 'ranking'; roundId = null;
+  } catch (err) { notify(err.message); }
+  invite = false;
+  history.replaceState(null, '', '/');
+}
+
+function authView(app) {
+  const field = (label, field, attrs) => `<label>${label}<input name="${field}" ${attrs} required></label>`;
+  const nick = field('닉네임', 'name', 'maxlength="12" autocomplete="username"');
+  const pin = (label, auto) => field(label, 'pin', `type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="${auto}"`);
+  const card = invite ? `<p class="notice"><strong>${e(invite.name)}</strong>에 초대받았어요.<br><span class="sub">${kindNames[invite.kind]} · ${invite.members}명 · ${invite.open ? `${dateOnly(invite.start)} 시작 전까지 참가할 수 있어요` : '이미 시작해서 참가할 수 없어요'}</span></p>` : '';
+  const forms = {
+    login: `<form id="login">${nick}${pin('PIN (숫자 4자리)', 'current-password')}<button>로그인</button></form>`,
+    signup: `<form id="signup">${nick}${pin('PIN (숫자 4자리)', 'new-password')}<p class="sub">이메일 같은 개인정보는 받지 않아요. PIN은 다른 기기에서 다시 들어올 때 써요. 잊어도 같은 리그 친구가 초기화해 줄 수 있어요.</p><button>가입하고 시작하기</button></form>`,
+    recover: `<form id="recover">${nick}${field('초기화 코드 (숫자 6자리)', 'code', 'inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"')}${pin('새 PIN (숫자 4자리)', 'new-password')}<p class="sub">같은 리그 친구에게 "내 PIN 초기화 코드 만들어 줘"라고 부탁해 주세요. 리그의 순위 탭에서 만들 수 있어요.</p><button>새 PIN 정하기</button></form>`,
+  };
+  const tabs = `<nav class="tabs" aria-label="로그인 방식">${[['login', '로그인'], ['signup', '가입']].map(([v, t]) => `<button data-auth="${v}" class="${authMode === v ? 'active' : ''}">${t}</button>`).join('')}</nav>`;
+  app.innerHTML = `<h1>친구끼리 여는 리그</h1><p class="sub">닉네임과 PIN 4자리만 있으면 돼요.</p>${card}${authMode === 'recover' ? '<h2>PIN을 잊었어요</h2>' : tabs}${forms[authMode]}${authMode === 'recover' ? '<button class="link" data-auth="login">‹ 로그인으로 돌아가기</button>' : '<button class="link" data-auth="recover">PIN을 잊었어요</button>'}`;
 }
 
 function describe(r) {
@@ -97,11 +134,8 @@ function readRecord(form) {
 
 function render() {
   const app = $('#app'), me = state.actor;
-  $('#who').innerHTML = me ? `${name(me)} · <button class="link" data-account>계정 전환</button>` : '';
-  if (!me) {
-    app.innerHTML = `<h1>시험 계정 선택</h1><p class="sub">연습용 가상 회원이에요. 이름을 누르면 바로 들어가요. 실제 로그인은 아직 연결되지 않았어요.</p><div class="grid">${Object.entries(state.users).map(([u, n]) => `<button class="secondary" data-login="${e(u)}">${e(n)}</button>`).join('')}</div>`;
-    return;
-  }
+  $('#who').innerHTML = me ? `${name(me)} · <button class="link" data-logout>로그아웃</button>` : '';
+  if (!me) { authView(app); return; }
   if (selected === 'new') { createView(app); return; }
   const l = state.leagues.find(x => x.id === selected);
   if (!l?.rounds) { leagueList(app); return; }
@@ -110,17 +144,14 @@ function render() {
   app.innerHTML = `<button class="link" data-back>‹ 리그 목록</button><h1>${e(l.name)}</h1>
     <p class="sub">${kindNames[l.kind]} · ${l.members.length}명 · ${dateOnly(l.rounds[0].start)} ~ ${dateOnly(l.rounds.at(-1).close - 1)} · ${l.final ? '최종 확정' : '잠정 순위'}</p>
     <p class="sub">기록 수정 요청은 ${dateTime(l.requestClose)}까지 받아요.</p>
+    ${l.start > state.now ? '<button class="secondary" data-invite>친구 초대 링크 복사</button>' : ''}
     <nav class="tabs" aria-label="리그 메뉴">${tabs.map(([v, t]) => `<button data-tab="${v}" class="${tab === v ? 'active' : ''}">${t}</button>`).join('')}</nav><div id="panel"></div>`;
   ({round:roundPanel, ranking:rankingPanel, requests:requestsPanel, history:historyPanel})[tab](l, $('#panel'));
 }
 
 function leagueList(app) {
-  const me = state.actor;
-  const item = x => {
-    const joined = x.members.includes(me), open = x.start > state.now;
-    return `<li><div><b>${e(x.name)}</b><span class="sub">${kindNames[x.kind]} · ${x.members.length}명 · ${joined ? '참가 중' : open ? `${dateOnly(x.start)} 시작 전까지 참가할 수 있어요` : '모집 종료'}</span></div><button class="secondary" data-open="${x.id}" ${joined || open ? '' : 'disabled'}>${joined ? '보기' : '참가'}</button></li>`;
-  };
-  app.innerHTML = `<h1>리그</h1><ul class="leagues">${state.leagues.map(item).join('')}</ul><button data-new>새 리그 만들기</button>`;
+  const item = x => `<li><div><b>${e(x.name)}</b><span class="sub">${kindNames[x.kind]} · ${x.members.length}명 · ${x.start > state.now ? `${dateOnly(x.start)} 시작` : '진행 중'}</span></div><button class="secondary" data-open="${x.id}">보기</button></li>`;
+  app.innerHTML = `<h1>리그</h1>${state.leagues.length ? `<ul class="leagues">${state.leagues.map(item).join('')}</ul>` : '<p class="sub">아직 참여 중인 리그가 없어요. 새 리그를 만들거나, 친구가 보내 준 초대 링크로 들어와 주세요.</p>'}<button data-new>새 리그 만들기</button>`;
 }
 
 function createView(app) {
@@ -200,8 +231,13 @@ function syncRequest(f, l, rnd) {
 }
 
 function rankingPanel(l, panel) {
+  const others = l.members.filter(u => u !== state.actor);
+  const help = !others.length ? '' : `<details ${resetInfo ? 'open' : ''}><summary>친구가 로그인하지 못하나요?</summary>
+    <p class="sub">PIN을 잊은 친구가 있으면 초기화 코드를 만들어 전해 주세요. 친구가 로그인 화면의 "PIN을 잊었어요"에서 코드를 넣고 새 PIN을 정하면 돼요. 코드는 24시간 동안만 쓸 수 있고 이력에 남아요. 만들면 그 친구가 로그인해 둔 기기는 모두 로그아웃돼요.</p>
+    ${resetInfo ? `<p class="notice"><strong>${name(resetInfo.user)}</strong> 님의 초기화 코드<br><b class="code">${resetInfo.code}</b></p>` : ''}
+    <ul class="leagues">${others.map(u => `<li><b>${name(u)}</b><button class="secondary" data-reset="${u}">초기화 코드 만들기</button></li>`).join('')}</ul></details>`;
   panel.innerHTML = `<section><table><thead><tr><th>순위</th><th>회원</th><th>누적 점수</th></tr></thead><tbody>${l.standings.map(r => `<tr class="${r.user === state.actor ? 'me' : ''}"><td class="num">${r.rank}</td><td>${name(r.user)}</td><td>${r.points}</td></tr>`).join('')}</tbody></table>
-    <p class="sub">점수가 낮을수록 순위가 높아요. ${l.rounds.length}회차 중 ${l.rounds.filter(r => r.counted).length}회차가 반영됐어요. 아직 시작하지 않은 회차와 WOD 방식이 엇갈린 회차는 빠져 있어요.</p></section>`;
+    <p class="sub">점수가 낮을수록 순위가 높아요. ${l.rounds.length}회차 중 ${l.rounds.filter(r => r.counted).length}회차가 반영됐어요. 아직 시작하지 않은 회차와 WOD 방식이 엇갈린 회차는 빠져 있어요.</p>${help}</section>`;
 }
 
 function requestsPanel(l, panel) {
@@ -219,6 +255,7 @@ function historyPanel(l, panel) {
   const rec = r => e(r ? describe(r) : '없음');
   const detail = h => h.request ? `${label(h.request.round)} · ${parties(h.request)}${h.request.decision ? ' · ' + e(h.request.decision) : ''}`
     : h.target ? `${label(h.round)} · ${name(h.target)} · ${rec(h.before)} → ${rec(h.after)}`
+    : h.member ? name(h.member)
     : h.round !== undefined ? label(h.round) + (h.before.photo !== h.after.photo ? ' · 사진 변경' : '')
     : '';
   panel.innerHTML = `<section>${l.history.length ? `<ul class="log">${l.history.slice().reverse().map(h => `<li><time>${dateTime(h.at)}</time><b>${name(h.actor)}</b> ${e(h.action)}<br><span class="sub">${detail(h)}</span></li>`).join('')}</ul>` : '아직 변경 이력이 없어요.'}</section>`;
@@ -259,14 +296,19 @@ document.addEventListener('click', async ev => {
   const b = ev.target.closest('button');
   if (!b) return;
   try {
-    if (b.dataset.login) { await api('/api/login', {user:b.dataset.login}); await load(); }
-    else if (b.hasAttribute('data-account')) { state.actor = null; selected = null; roundId = null; tab = 'ranking'; render(); }
+    if (b.hasAttribute('data-logout')) { await api('/api/logout', {}); selected = null; roundId = null; tab = 'ranking'; resetInfo = null; await load(); }
+    else if (b.dataset.auth) { authMode = b.dataset.auth; render(); }
     else if (b.hasAttribute('data-back')) { selected = null; await load(); }
     else if (b.hasAttribute('data-new')) { selected = 'new'; render(); }
-    else if (b.dataset.open) {
-      const l = state.leagues.find(l => l.id === b.dataset.open);
-      if (!l.members.includes(state.actor)) await api('/api/action', {action:'join', league:l.id});
-      selected = l.id; roundId = null; tab = 'ranking';
+    else if (b.dataset.open) { selected = b.dataset.open; roundId = null; tab = 'ranking'; await load(); }
+    else if (b.hasAttribute('data-invite')) {
+      const url = `${location.origin}/?join=${state.leagues.find(l => l.id === selected).invite}`;
+      try { await navigator.clipboard.writeText(url); notify('초대 링크를 복사했어요. 단톡방에 붙여 넣어 주세요.'); }
+      catch { prompt('이 링크를 복사해서 친구에게 보내 주세요.', url); }
+    }
+    else if (b.dataset.reset) {
+      const issued = await api('/api/reset', {target:b.dataset.reset});
+      resetInfo = {user:b.dataset.reset, code:issued.code};
       await load();
     }
     else if (b.dataset.round) { roundId = b.dataset.round; await load(); }
@@ -306,7 +348,7 @@ document.addEventListener('click', async ev => {
       calendar();
     }
     // 다른 회원의 변경이 보이도록 탭을 옮길 때마다 다시 불러옵니다.
-    else if (b.dataset.tab) { tab = b.dataset.tab; await load(); }
+    else if (b.dataset.tab) { tab = b.dataset.tab; resetInfo = null; await load(); }
   } catch (err) { notify(err.message); }
 });
 
@@ -321,6 +363,13 @@ document.addEventListener('submit', async ev => {
   const data = {league:selected, round:roundId};
   try {
     if (btn) btn.disabled = true;
+    if (['login', 'signup', 'recover'].includes(f.id)) {
+      const v = n => f.elements[n]?.value;
+      await api('/api/' + f.id, f.id === 'recover' ? {name:v('name'), code:v('code'), pin:v('pin')} : {name:v('name'), pin:v('pin')});
+      authMode = 'login';
+      await load();
+      return;
+    }
     if (f.id === 'create') Object.assign(data, {action:'create', name:f.elements.name.value, kind:f.elements.kind.value, start:pick.start, end:pick.end, dates:f.elements.kind.value === 'daily' ? pickedDates() : [], count:Number(f.elements.count.value), duration:Number(f.elements.duration.value)});
     else if (f.id === 'record') Object.assign(data, {action:'record', record:readRecord(f), version:rnd.versions[state.actor] || 0});
     else if (f.id === 'guide') {

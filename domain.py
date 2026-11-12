@@ -2,11 +2,12 @@
 import base64
 import copy
 import math
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone, date
 
 KST = timezone(timedelta(hours=9))
-USERS = {'ga': '가람', 'na': '나래', 'da': '다온', 'ra': '라온'}
+DEMO_NAMES = {'ga': '가람', 'na': '나래', 'da': '다온', 'ra': '라온'}
 TYPES = {'time': '시간형', 'amrap': 'AMRAP', 'reps': '횟수형', 'weight': '중량형', 'done': '완료형'}
 
 
@@ -82,7 +83,7 @@ def round_scores(league, rnd):
             counts[r['type']] = counts.get(r['type'], 0) + 1
     mismatch = len(counts) > 1
     members = league['members']
-    names = lambda u: USERS[u]
+    names = lambda u: league['names'][u]
     ordered = sorted(members, key=names) if mismatch else sorted(members, key=lambda u: (score_key(records[u]) if records.get(u) else (3,), names(u)))
     points, previous, rank = {}, None, 0
     for i, u in enumerate(ordered):
@@ -116,7 +117,7 @@ def view(league, now):
         if rnd['counted']:
             for u, p in rnd['score']['points'].items():
                 totals[u] += p
-    ordered = sorted(totals, key=lambda u: (totals[u], USERS[u]))
+    ordered = sorted(totals, key=lambda u: (totals[u], league['names'][u]))
     result['standings'] = []
     last, rank = None, 0
     for i, u in enumerate(ordered):
@@ -158,23 +159,27 @@ def schedule(data):
 
 
 def apply(state, actor, data, now):
-    require(actor in USERS, '로컬 시험 계정을 선택해 주세요.')
+    require(actor in state['users'], '먼저 로그인해 주세요.')
     action = data.get('action')
     if action == 'create':
         require(data.get('kind') in ('daily', 'designated'), '리그 종류를 선택해 주세요.')
         rounds = schedule(data)
         require(stamp(data['start']) > now, '참가자를 모집할 수 있도록 첫 집계일은 내일 이후로 선택해 주세요.')
         lid = uuid.uuid4().hex[:12]
-        state['leagues'].append(dict(id=lid, name=text(data.get('name'), 60), kind=data['kind'], start=stamp(data['start']), owner=actor, members=[actor], rounds=rounds, requests=[], history=[]))
+        state['leagues'].append(dict(id=lid, name=text(data.get('name'), 60), kind=data['kind'], start=stamp(data['start']), owner=actor, members=[actor], names={actor: state['users'][actor]['name']}, invite=secrets.token_urlsafe(12), rounds=rounds, requests=[], history=[]))
         return lid
-    league = next((l for l in state['leagues'] if l['id'] == data.get('league')), None)
-    require(league is not None, '리그를 찾을 수 없습니다.')
     if action == 'join':
-        require(now < league['start'], '시작 후에는 참가 명단을 변경할 수 없습니다.')
-        require(actor not in league['members'], '이미 참가하셨습니다.')
+        token = data.get('invite')
+        league = next((l for l in state['leagues'] if isinstance(token, str) and l.get('invite') == token), None)
+        require(league is not None, '초대 링크를 확인해 주세요.')
+        require(now < league['start'], '이미 시작한 리그라 참가할 수 없어요.')
+        require(actor not in league['members'], '이미 참가하셨어요.')
         league['members'].append(actor)
+        league['names'][actor] = state['users'][actor]['name']
         audit(league, actor, '리그 참가', now)
         return league['id']
+    league = next((l for l in state['leagues'] if l['id'] == data.get('league')), None)
+    require(league is not None, '리그를 찾을 수 없습니다.')
     require(actor in league['members'], '리그 참가자만 이용하실 수 있습니다.')
     rnd = next((r for r in league['rounds'] if r['id'] == data.get('round')), None)
     if action in ('record', 'guide', 'request'):
@@ -253,9 +258,19 @@ def apply(state, actor, data, now):
 def initial(now):
     today = datetime.fromtimestamp(now, KST).date()
     days = [(today - timedelta(days=i)).isoformat() for i in (2, 1, 0)]
-    league = dict(id='local-demo', name='우리끼리 3일 챌린지', kind='daily', start=stamp(days[0]), owner='ga', members=list(USERS), rounds=schedule(dict(kind='daily', start=days[0], end=days[-1], dates=days)), requests=[], history=[])
+    league = dict(id='local-demo', name='우리끼리 3일 챌린지', kind='daily', start=stamp(days[0]), owner='ga', members=list(DEMO_NAMES), names=dict(DEMO_NAMES), invite=secrets.token_urlsafe(12), rounds=schedule(dict(kind='daily', start=days[0], end=days[-1], dates=days)), requests=[], history=[])
     league['rounds'][0]['records'] = {'ga': {'division': 'rx', 'type': 'reps', 'value': 100}, 'na': {'division': 'scaled', 'type': 'reps', 'value': 120}, 'da': {'division': 'attendance'}}
     league['rounds'][0]['versions'] = dict.fromkeys(('ga', 'na', 'da'), 1)
     league['rounds'][1]['records'] = {'ga': {'division': 'rx', 'type': 'amrap', 'rounds': 5, 'extra': 3}, 'na': {'division': 'rx', 'type': 'reps', 'value': 95}}
     league['rounds'][1]['versions'] = {'ga': 1, 'na': 1}
-    return {'leagues': [league]}
+    return {'users': {}, 'sessions': {}, 'leagues': [league]}
+
+
+def migrate(state):
+    """계정이 없던 이전 로컬 DB를 닉네임·초대 구조로 올립니다. 여러 번 실행해도 같습니다."""
+    state.setdefault('users', {})
+    state.setdefault('sessions', {})
+    for league in state['leagues']:
+        league.setdefault('names', {u: DEMO_NAMES.get(u, u) for u in league['members']})
+        league.setdefault('invite', secrets.token_urlsafe(12))
+    return state

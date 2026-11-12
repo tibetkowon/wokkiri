@@ -1,6 +1,6 @@
 import copy
 import unittest
-from domain import apply, initial, round_scores, view, record, schedule, stamp
+from domain import DEMO_NAMES, apply, initial, round_scores, view, record, schedule, stamp
 
 NOW = stamp('2026-11-12') + 3600*12
 
@@ -10,6 +10,7 @@ def reps(n, division='rx'):
 class Rules(unittest.TestCase):
     def setUp(self):
         self.state = initial(NOW)
+        self.state['users'] = {u: dict(name=n) for u, n in DEMO_NAMES.items()}
         self.l = self.state['leagues'][0]
         self.r = self.l['rounds'][0]
 
@@ -139,16 +140,28 @@ class Rules(unittest.TestCase):
         self.assertEqual(rounds[0]['close'],rounds[1]['start'])
         self.assertEqual(rounds[-1]['close'],stamp('2026-12-22'))
         lid=apply(self.state,'ga',dict(action='create',name='새 리그',kind='designated',start='2026-12-01',count=3,duration=7),NOW)
-        apply(self.state,'na',dict(action='join',league=lid),NOW)
+        apply(self.state,'na',dict(action='join',invite=self.state['leagues'][-1]['invite']),NOW)
         with self.assertRaises(ValueError):
-            apply(self.state,'da',dict(action='join',league=lid),stamp('2026-12-01'))
+            apply(self.state,'da',dict(action='join',invite=self.state['leagues'][-1]['invite']),stamp('2026-12-01'))
         l=self.state['leagues'][-1]
         self.assertTrue(all(s['points']==0 for s in view(l,NOW)['standings']))
 
     def test_daily_freezes_on_start_even_without_counted_day(self):
         lid=apply(self.state,'ga',dict(action='create',name='주말 제외 리그',kind='daily',start='2026-12-01',end='2026-12-03',dates=['2026-12-03']),NOW)
         with self.assertRaises(ValueError):
-            apply(self.state,'na',dict(action='join',league=lid),stamp('2026-12-01'))
+            apply(self.state,'na',dict(action='join',invite=self.state['leagues'][-1]['invite']),stamp('2026-12-01'))
+
+    def test_join_needs_the_invite_and_keeps_the_nickname(self):
+        apply(self.state,'ga',dict(action='create',name='새 리그',kind='daily',start='2026-12-01',end='2026-12-03',dates=['2026-12-01']),NOW)
+        l=self.state['leagues'][-1]
+        for bad in [None,'',123,'틀린코드']:
+            with self.assertRaises(ValueError):
+                apply(self.state,'na',dict(action='join',league=l['id'],invite=bad),NOW)
+        apply(self.state,'na',dict(action='join',invite=l['invite']),NOW)
+        self.assertEqual(l['names'],{'ga':'가람','na':'나래'})
+        for actor in ['na',None]:
+            with self.assertRaises(ValueError):
+                apply(self.state,actor,dict(action='join',invite=l['invite']),NOW)
 
     def test_guide_photo_history_and_version(self):
         photo='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
