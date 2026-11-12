@@ -26,8 +26,12 @@ class Accounts(unittest.TestCase):
             with self.assertRaises(RuleError):
                 auth.signup(self.state, name, pin)
         auth.signup(self.state, 'Tom', '1234')
+        for twin in ['tom', 'ＴＯＭ', 'T​om', '‮tom']:
+            with self.assertRaises(RuleError):
+                auth.signup(self.state, twin, '1234')
         with self.assertRaises(RuleError):
-            auth.signup(self.state, 'tom', '1234')
+            auth.signup(self.state, '​​', '1234')
+        self.assertEqual(auth.login(self.state, 'ＴＯＭ', '1234', NOW), auth.find(self.state, 'Tom'))
 
     def test_login_and_lockout(self):
         self.assertEqual(auth.login(self.state, '가람', '1111', NOW), 'ga')

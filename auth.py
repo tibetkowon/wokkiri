@@ -4,6 +4,7 @@ import hmac
 import math
 import re
 import secrets
+import unicodedata
 import uuid
 
 from domain import DEMO_NAMES, RuleError, audit, require, text
@@ -29,8 +30,14 @@ def _pin(value):
     return value
 
 
+def clean(name):
+    """전각·제로폭 문자로 같은 닉네임을 하나 더 만들지 못하게 정규화합니다. shortcut: 모양만 같은 다른 문자(키릴 문자 등)는 막지 못합니다."""
+    name = unicodedata.normalize('NFKC', name)
+    return ''.join(c for c in name if unicodedata.category(c) not in ('Cc', 'Cf')).strip()
+
+
 def find(state, name):
-    key = name.strip().casefold() if isinstance(name, str) else ''
+    key = clean(name).casefold() if isinstance(name, str) else ''
     return next((u for u, v in state['users'].items() if v['name'].casefold() == key), None)
 
 
@@ -41,7 +48,7 @@ def _new(state, uid, name, pin):
 
 
 def signup(state, name, pin):
-    name = text(name, 12)
+    name = text(clean(name) if isinstance(name, str) else name, 12)
     _pin(pin)
     require(find(state, name) is None, '이미 쓰는 닉네임이에요. 다른 닉네임을 골라 주세요.')
     return _new(state, uuid.uuid4().hex[:10], name, pin)
