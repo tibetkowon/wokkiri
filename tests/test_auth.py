@@ -37,6 +37,13 @@ class Accounts(unittest.TestCase):
         self.assertEqual(auth.find(self.state, '가람'), 'ga')
         with self.assertRaises(RuleError):
             auth.signup(self.state, '가람', '5555')
+        # 정규화하면 같아지는 이름이 둘 저장돼 있으면 어느 쪽으로도 로그인시키지 않습니다.
+        self.state['users']['na']['name'] = '가람'
+        self.assertIsNone(auth.find(self.state, '가람'))
+        with self.assertRaises(RuleError):
+            auth.login(self.state, '가람', '1111', NOW)
+        with self.assertRaises(RuleError):
+            auth.signup(self.state, '가람', '5555')
 
     def test_login_and_lockout(self):
         self.assertEqual(auth.login(self.state, '가람', '1111', NOW), 'ga')

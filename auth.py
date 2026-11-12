@@ -36,9 +36,15 @@ def clean(name):
     return ''.join(c for c in name if unicodedata.category(c) not in ('Cc', 'Cf')).strip()
 
 
-def find(state, name):
+def _matches(state, name):
     key = clean(name).casefold() if isinstance(name, str) else ''
-    return next((u for u, v in state['users'].items() if clean(v['name']).casefold() == key), None)
+    return [u for u, v in state['users'].items() if clean(v['name']).casefold() == key]
+
+
+def find(state, name):
+    # 같은 이름이 둘 이상이면(정규화 도입 전에 저장된 이름끼리 충돌) 아무도 고르지 않습니다.
+    found = _matches(state, name)
+    return found[0] if len(found) == 1 else None
 
 
 def _new(state, uid, name, pin):
@@ -50,7 +56,7 @@ def _new(state, uid, name, pin):
 def signup(state, name, pin):
     name = text(clean(name) if isinstance(name, str) else name, 12)
     _pin(pin)
-    require(find(state, name) is None, '이미 쓰는 닉네임이에요. 다른 닉네임을 골라 주세요.')
+    require(not _matches(state, name), '이미 쓰는 닉네임이에요. 다른 닉네임을 골라 주세요.')
     return _new(state, uuid.uuid4().hex[:10], name, pin)
 
 
