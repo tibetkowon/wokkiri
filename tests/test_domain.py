@@ -66,6 +66,28 @@ class Rules(unittest.TestCase):
             self.run_action('ga',now=close,action='record',version=1,record={'division':'attendance'})
         self.run_action('ga',now=close+1000000,action='record',version=1,record=reps(2))
 
+    def test_attendance_only_switch(self):
+        close=self.r['close']
+        only={'division':'attendance'}
+        # 마감 전에는 Rx 기록을 출석만으로 바꾸고 다시 기록으로 바꿀 수 있습니다.
+        self.run_action('ga',now=close-1,action='record',version=1,record=only)
+        self.assertEqual(self.r['records']['ga'],only)
+        self.run_action('ga',now=close-1,action='record',version=2,record=reps(100))
+        # 마감 뒤에는 불일치가 없을 때도, 불일치 예외 중에도 출석만으로 바꿀 수 없습니다.
+        with self.assertRaises(ValueError):
+            self.run_action('ga',now=close,action='record',version=3,record=only)
+        self.r['records']['na']=dict(division='rx',type='amrap',rounds=1,extra=0)
+        with self.assertRaises(ValueError):
+            self.run_action('ga',now=close,action='record',version=3,record=only)
+        self.assertEqual(self.r['records']['ga'],reps(100))
+        # 지정 WOD에는 마감 전에도 출석만이 없습니다.
+        lid=apply(self.state,'ga',dict(action='create',name='지정 리그',kind='designated',start='2026-12-01',count=1,duration=7),NOW)
+        with self.assertRaises(ValueError):
+            apply(self.state,'ga',dict(action='record',league=lid,round='0',version=0,record=only),stamp('2026-12-01'))
+        apply(self.state,'ga',dict(action='record',league=lid,round='0',version=0,record=reps(1)),stamp('2026-12-01'))
+        with self.assertRaises(ValueError):
+            apply(self.state,'ga',dict(action='record',league=lid,round='0',version=1,record=only),stamp('2026-12-01'))
+
     def request(self, actor='na', target='ga', judge='da', now=NOW):
         self.run_action(actor,now=now,action='request',target=target,judge=judge,proposal=reps(99),reason='기록을 확인해 주세요.')
         return self.l['requests'][-1]
@@ -89,6 +111,7 @@ class Rules(unittest.TestCase):
             self.run_action('ra',action='decide',request=q['id'],decision='invalidate',reason='확인했습니다.')
         self.run_action('da',now=NOW+999999,action='decide',request=q['id'],decision='invalidate',reason='확인했습니다.')
         self.assertIsNone(self.r['records']['ga'])
+        self.assertEqual(q['decision'],'기록 삭제')
         self.assertEqual(q['status'],'closed')
 
     def test_two_members_rejection_and_self_request(self):

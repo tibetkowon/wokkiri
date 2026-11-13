@@ -15,7 +15,7 @@ ROOT = Path(__file__).parent
 DB = Path(os.environ.get('WOKKIRI_DB', str(ROOT / 'data' / 'wokkiri.sqlite3')))
 # 가상 회원(PIN 1111~4444, 복구 키 DEMO-DEMO-DEMO)과 예시 리그를 만듭니다. 누구나 아는 값이라 배포 서버에서는 켜지 않습니다.
 DEMO = os.environ.get('WOKKIRI_DEMO') == '1'
-FILES = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/logo.png': ('logo.png', 'image/png')}
+FILES = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/logo.png': ('logo.png', 'image/png'), '/qrcode.js': ('qrcode.js', 'text/javascript; charset=utf-8')}
 
 
 def fresh():
@@ -74,12 +74,12 @@ def session_cookie(token, age=auth.SESSION_SECONDS):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def send(self, code, body, content_type='application/json; charset=utf-8', cookie=None):
+    def send(self, code, body, content_type='application/json; charset=utf-8', cookie=None, cache='no-store'):
         raw = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(raw)))
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', cache)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'")
         if cookie:
@@ -115,7 +115,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path not in FILES:
             return self.send(404, {'error': '페이지를 찾을 수 없습니다.'})
         name, mime = FILES[url.path]
-        self.send(200, (ROOT / 'web' / name).read_bytes(), mime)
+        # 로고만 하루 캐시합니다. 나머지는 고치면 바로 보이도록 no-store 그대로입니다.
+        self.send(200, (ROOT / 'web' / name).read_bytes(), mime, cache='public, max-age=86400' if name == 'logo.png' else 'no-store')
 
     def do_POST(self):
         if not self.allowed() or self.headers.get('Origin', f'http://{self.headers.get("Host")}') != f'http://{self.headers.get("Host")}' or self.headers.get('Content-Type') != 'application/json':

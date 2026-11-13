@@ -83,6 +83,20 @@ class HTTPChecks(unittest.TestCase):
         self.assertEqual(err['error'], '입력 형식을 확인해 주세요.')
         self.assertEqual(self.request('POST', '/api/reset', dict(target='na'), cookie)[0], 404)
 
+    def test_static_files_and_cache(self):
+        web = Path(app.__file__).parent / 'web'
+        for path, name, mime, cache in [('/', 'index.html', 'text/html; charset=utf-8', 'no-store'), ('/app.js', 'app.js', 'text/javascript; charset=utf-8', 'no-store'),
+                                        ('/qrcode.js', 'qrcode.js', 'text/javascript; charset=utf-8', 'no-store'), ('/logo.png', 'logo.png', 'image/png', 'public, max-age=86400')]:
+            con = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
+            con.request('GET', path)
+            res = con.getresponse()
+            self.assertEqual((res.status, res.getheader('Content-Type'), res.getheader('Cache-Control'), res.read()), (200, mime, cache, (web / name).read_bytes()), path)
+            con.close()
+        self.assertEqual(self.request('GET', '/qrcode.LICENSE.txt')[0], 404)
+        self.assertEqual(self.request('GET', '/api/state')[0], 200)
+        # 헤더 로고는 42px로만 쓰므로 원본(약 800KB)이 다시 들어오지 않게 합니다.
+        self.assertLess((web / 'logo.png').stat().st_size, 50000)
+
     def test_invite_join_and_hidden_leagues(self):
         _, ga, _ = self.login('garam', '1111')
         start = (datetime.now(KST).date() + timedelta(days=2)).isoformat()

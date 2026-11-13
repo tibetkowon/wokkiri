@@ -44,6 +44,8 @@ button:disabled{opacity:.45;cursor:default}
 .notice strong{color:var(--warn)}
 .code{display:block;font-size:24px;letter-spacing:2px;text-align:center;overflow-wrap:anywhere;user-select:all}
 .ok{font-weight:600}
+.invite{margin-top:12px;padding:2px 12px 10px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.invite img{display:block;max-width:100%;margin:14px auto 6px;image-rendering:pixelated}
 
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:10px 4px;border-bottom:1px solid var(--line)}

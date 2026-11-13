@@ -3,7 +3,7 @@ const e = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;'
 let state, selected = null, tab = 'ranking', roundId = null, timer;
 // 초대 링크(/?join=코드)로 들어왔는지, 로그인 화면의 모드, 방금 받아 아직 저장 확인을 안 한 복구 키, 초대받은 리그에서 닉네임이 겹쳤는지입니다.
 const inviteToken = new URLSearchParams(location.search).get('join');
-let invite = null, authMode = inviteToken ? 'signup' : 'login', recoveryKey = null, needNick = false;
+let invite = null, authMode = inviteToken ? 'signup' : 'login', recoveryKey = null, needNick = false, inviteOpen = false;
 // 복구 키를 받고 아직 "계속하기"로 확인하지 않았다는 표시입니다. 키 평문은 메모리(recoveryKey)에만 두고,
 // 새로고침해도 확인 단계를 건너뛰지 않도록 sessionStorage에는 이 표시(비밀값 아님)만 남깁니다.
 let keyPending = false;
@@ -154,7 +154,7 @@ function syncFields(form, r) {
         : num('value', 'Time Cap까지 완료한 Reps', r?.finished === false ? r.value : ''))
     : type === 'amrap' ? `<div class="row">${num('rounds', 'Rounds', r?.rounds ?? 0)}${num('extra', '+ Reps', r?.extra ?? 0)}</div>`
     : type === 'done' ? choices('결과', 'finished', [['yes','완료'], ['no','실패']], finished ? 'yes' : 'no')
-    : type === 'weight' ? num('value', '지정 Reps를 모두 성공한 최고 중량 (lb)', r?.value, 'min="0.01" step="any"')
+    : type === 'weight' ? num('value', '지정 Reps를 모두 성공한 최고 중량 (lb)', r?.value, 'min="0.01" step="any"') + (form.querySelector('[name=division][value=attendance]') ? '<p class="sub">지정 횟수를 모두 성공한 무게가 없으면 \'출석만\'을 선택해 주세요.</p>' : '')
     : num('value', 'Total Reps', r?.value);
 }
 
@@ -191,9 +191,22 @@ function render() {
   app.innerHTML = `<button class="link" data-back>‹ 리그 목록</button><h1>${e(l.name)}</h1>
     <p class="sub">${kindNames[l.kind]} · ${l.members.length}명 · ${dateOnly(l.rounds[0].start)} ~ ${dateOnly(l.rounds.at(-1).close - 1)} · ${l.final ? '최종 확정' : '잠정 순위'}</p>
     <p class="sub">기록 수정 요청은 ${dateTime(l.requestClose)}까지 받아요.</p>
-    ${l.start > state.now ? '<button class="secondary" data-invite>친구 초대 링크 복사</button>' : ''}
+    ${l.start > state.now ? `<button class="secondary" data-invite aria-expanded="${inviteOpen}">친구 초대</button>${inviteOpen ? inviteCard(l) : ''}` : ''}
     <nav class="tabs" aria-label="리그 메뉴">${tabs.map(([v, t]) => `<button data-tab="${v}" class="${tab === v ? 'active' : ''}">${t}</button>`).join('')}</nav><div id="panel"></div>`;
   ({round:roundPanel, ranking:rankingPanel, requests:requestsPanel, history:historyPanel})[tab](l, $('#panel'));
+}
+
+// 초대 링크에는 참가용 비밀 코드가 있어 QR은 외부 서비스 없이 브라우저 안(web/qrcode.js)에서 만듭니다.
+function inviteCard(l) {
+  const url = `${location.origin}/?join=${l.invite}`;
+  let img = '';
+  if (typeof qrcode === 'function') {
+    const qr = qrcode(0, 'M');
+    qr.addData(url);
+    qr.make();
+    img = `<img src="${qr.createDataURL(6)}" alt="초대 링크 QR 코드">`;
+  }
+  return `<div class="invite"><label>초대 링크<input readonly value="${e(url)}"></label><button class="secondary" data-copy-link>링크 복사</button>${img}<p class="sub">링크를 보내거나 QR 코드를 보여 주세요. 시작일 전까지 참가할 수 있어요.</p></div>`;
 }
 
 function leagueList(app) {
@@ -246,12 +259,12 @@ function roundPanel(l, panel) {
       ${started ? `<details><summary>WOD 편집</summary><form id="guide"><label>WOD 내용<textarea name="text" maxlength="4000">${e(rnd.guide.text)}</textarea></label><label>사진 (PNG/JPEG, 2MB 이하)<input name="photo" type="file" accept="image/png,image/jpeg"></label>${rnd.guide.photo ? '<label><input name="remove" type="checkbox">기존 사진 삭제</label>' : ''}<button class="secondary">WOD 저장</button></form></details>` : ''}</section>
     ${!direct ? '' : l.kind === 'daily' && !own
       ? '<section><h2>내 기록</h2><p class="sub">출석을 누르면 기록을 적을 수 있어요. 출석만 해도 점수가 들어가요.</p><button data-attend>출석</button></section>'
-      : `<section><h2>내 기록${own?.division === 'attendance' ? ' · 출석 완료' : ''}</h2><form id="record">${recordFields(false, own)}<button>${own?.type ? '기록 수정' : '기록 저장'}</button></form></section>`}
+      : `<section><h2>내 기록${own?.division === 'attendance' ? ' · 출석 완료' : ''}</h2><form id="record">${recordFields(l.kind === 'daily', own)}<button>${own?.type ? '기록 수정' : '기록 저장'}</button></form></section>`}
     <section><h2>회차 기록</h2><table><thead><tr><th>회원</th><th>기록</th><th>점수</th></tr></thead><tbody>${s.order.map(row).join('')}</tbody></table>
       <p class="sub">참여하지 않으면 ${l.members.length}점이에요.${started && open && !s.mismatch ? ' 마감 전 점수는 바뀔 수 있어요.' : ''}</p>
       ${started && state.now < l.requestClose && targets.length ? `<details><summary>기록 수정 요청하기</summary><form id="request">
         <label>누구 기록인가요?<select name="target">${options(targets.map(u => [u, u === me ? `${names[u]} (본인)` : names[u]]))}</select></label>
-        ${choices('어떤 요청인가요?', 'invalidate', [['no','기록을 고쳐 주세요'], ['yes','잘못 올라온 기록이에요 (삭제 요청)']], 'no', 'invalidate')}
+        ${choices('어떤 요청인가요?', 'invalidate', [['no','기록을 고쳐 주세요'], ['yes','잘못 올라온 기록이에요 (기록 삭제 요청)']], 'no', 'invalidate')}
         <div class="proposal"><p class="sub">이렇게 고치면 좋겠다 싶은 기록을 적어 주세요.</p>${recordFields(l.kind === 'daily')}</div>
         <label>이유<textarea name="reason" required maxlength="1000"></textarea></label>
         <label>확인해 줄 회원 (판정자)<select name="judge"></select></label><button>요청 보내기</button></form></details>` : ''}</section>`;
@@ -285,11 +298,11 @@ function rankingPanel(l, panel) {
 
 function requestsPanel(l, panel) {
   const item = q => `<section><p><b>${parties(q)}</b> <span class="sub">${e(l.rounds.find(r => r.id === q.round).label)} · ${statusNames[q.status]}</span></p>
-    <p>${e(q.reason)}</p><p class="sub">요청: ${e(q.proposal ? describe(q.proposal) : '기록 빼기')} · 판정자: ${q.judge ? name(q.judge) : '없음 (2명 리그)'}</p>
+    <p>${e(q.reason)}</p><p class="sub">요청: ${e(q.proposal ? describe(q.proposal) : '기록 삭제')} · 판정자: ${q.judge ? name(q.judge) : '없음 (2명 리그)'}</p>
     ${q.reply ? `<p class="sub">본인 답변: ${e(q.reply)}</p>` : ''}${q.decisionReason ? `<p class="sub">판정 이유: ${e(q.decisionReason)}</p>` : ''}${q.decision ? `<p class="ok">${e(q.decision)}</p>` : ''}
     ${waiting(q, state.actor) ? `<form class="resolve" data-request="${q.id}" data-mode="${q.status}">${q.status === 'author'
       ? '<label>한마디 (거절할 때는 이유를 꼭 적어 주세요)<textarea name="reason" maxlength="1000"></textarea></label><div class="row"><button name="choice" value="accept">수락하고 반영</button><button name="choice" value="reject" class="secondary">거절</button></div>'
-      : choices('판정', 'decision', [['keep','기존 기록 유지'], ['modify','요청대로 반영'], ['invalidate','기록 빼기']]) + '<label>이유<textarea name="reason" required maxlength="1000"></textarea></label><button>판정 완료</button>'}</form>` : ''}</section>`;
+      : choices('판정', 'decision', [['keep','기존 기록 유지'], ['modify','요청대로 반영'], ['invalidate','기록 삭제']]) + '<label>이유<textarea name="reason" required maxlength="1000"></textarea></label><button>판정 완료</button>'}</form>` : ''}</section>`;
   panel.innerHTML = `<p class="sub">다른 회원 기록에 대한 요청은 본인이 수락하면 바로 반영돼요. 생각이 다르면 판정자가 정해 줘요. 마감 뒤 내 기록 수정이나 늦은 제출도 판정자가 확인해 줘요.</p>${l.requests.slice().reverse().map(item).join('') || '<section>아직 요청이 없어요.</section>'}`;
 }
 
@@ -346,11 +359,12 @@ document.addEventListener('click', async ev => {
     else if (b.hasAttribute('data-continue')) { setKeyPending(false); await load(); }
     else if (b.hasAttribute('data-skip')) { leaveInvite(); render(); }
     else if (b.dataset.auth) { authMode = b.dataset.auth; render(); }
-    else if (b.hasAttribute('data-back')) { selected = null; await load(); }
+    else if (b.hasAttribute('data-back')) { selected = null; inviteOpen = false; await load(); }
     else if (b.hasAttribute('data-new')) { selected = 'new'; render(); }
-    else if (b.dataset.open) { selected = b.dataset.open; roundId = null; tab = 'ranking'; await load(); }
-    else if (b.hasAttribute('data-invite')) {
-      const url = `${location.origin}/?join=${state.leagues.find(l => l.id === selected).invite}`;
+    else if (b.dataset.open) { selected = b.dataset.open; roundId = null; tab = 'ranking'; inviteOpen = false; await load(); }
+    else if (b.hasAttribute('data-invite')) { inviteOpen = !inviteOpen; render(); }
+    else if (b.hasAttribute('data-copy-link')) {
+      const url = $('.invite input').value;
       try { await navigator.clipboard.writeText(url); notify('초대 링크를 복사했어요. 단톡방에 붙여 넣어 주세요.'); }
       catch { prompt('이 링크를 복사해서 친구에게 보내 주세요.', url); }
     }

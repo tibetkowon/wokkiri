@@ -262,7 +262,7 @@ def apply(state, actor, data, now):
             else:
                 if decision != 'keep':
                     put(league, rnd, q['target'], q['proposal'] if decision == 'modify' else None, actor, now, '요청 반영')
-                q['decision'] = {'keep': '기존 기록 유지', 'modify': '요청대로 반영', 'invalidate': '기록 빼기'}[decision]
+                q['decision'] = {'keep': '기존 기록 유지', 'modify': '요청대로 반영', 'invalidate': '기록 삭제'}[decision]
             q['status'] = 'closed'
         audit(league, actor, '요청 답변' if action == 'reply' else '요청 판정', now, request=q)
     else:
