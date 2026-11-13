@@ -18,8 +18,8 @@ let names = {};
 // 새 리그 달력: 날짜는 (요일이 켜짐) XOR (개별로 뒤집음)일 때 선택입니다.
 let weekdaysOn = new Set([1, 2, 3, 4, 5]), flipped = new Set();
 let pick = null;
-// shortcut: 2027년 말까지의 공휴일·대체공휴일 표(2027년 월력요항 기준)입니다. 임시공휴일이 생기거나 2028년 리그를 열기 전에 갱신합니다.
-const HOLIDAYS = {'2026-12-25':'성탄절', '2027-01-01':'신정', '2027-02-06':'설 연휴', '2027-02-07':'설날', '2027-02-08':'설 연휴', '2027-02-09':'대체공휴일', '2027-03-01':'삼일절', '2027-05-01':'노동절', '2027-05-03':'대체공휴일', '2027-05-05':'어린이날', '2027-05-13':'부처님오신날', '2027-06-06':'현충일', '2027-07-17':'제헌절', '2027-07-19':'대체공휴일', '2027-08-15':'광복절', '2027-08-16':'대체공휴일', '2027-09-14':'추석 연휴', '2027-09-15':'추석', '2027-09-16':'추석 연휴', '2027-10-03':'개천절', '2027-10-04':'대체공휴일', '2027-10-09':'한글날', '2027-10-11':'대체공휴일', '2027-12-25':'성탄절', '2027-12-27':'대체공휴일'};
+// 공휴일·대체공휴일 표({날짜: 이름})는 시작할 때 /holidays.json에서 읽습니다(갱신: scripts/holidays.py). 못 읽으면 빈 표로 동작합니다.
+let holidays = {};
 const typeNames = {time:'For Time', amrap:'AMRAP', reps:'For Max Reps', weight:'For Load', done:'For Completion (EMOM 등)'};
 const kindNames = {daily:'일상 WOD', designated:'지정 WOD'};
 const statusNames = {author:'본인 답변을 기다리는 중', judge:'판정을 기다리는 중', closed:'마무리됨'};
@@ -228,7 +228,7 @@ function createView(app) {
     </div>
     <div class="period"><button type="button" data-pick="start"><small>시작일</small><b id="startText"></b></button><button type="button" data-pick="end" id="endField"><small>종료일</small><b id="endText"></b></button></div>
     <div id="designatedSchedule" hidden><div class="row"><label>라운드 수<input name="count" type="number" value="3" min="1" max="52"></label><label>라운드당 기간(일)<input name="duration" type="number" value="7" min="1" max="30"></label></div></div>
-    <p class="sub" id="calHint"></p><div id="dates"></div>
+    <p class="sub" id="calHint"></p><p class="sub" id="holidayNote" hidden></p><div id="dates"></div>
     <p class="sub">참가는 시작일 전까지 받아요.</p><button>리그 만들기</button></form>`;
   calendar();
 }
@@ -237,7 +237,7 @@ function pickedDates() {
   const dates = [], last = utc(pick.end);
   for (let d = utc(pick.start); d <= last; d.setUTCDate(d.getUTCDate() + 1)) {
     const value = d.toISOString().slice(0, 10);
-    if ((weekdaysOn.has(d.getUTCDay()) && !HOLIDAYS[value]) !== flipped.has(value)) dates.push(value);
+    if ((weekdaysOn.has(d.getUTCDay()) && !holidays[value]) !== flipped.has(value)) dates.push(value);
   }
   return dates;
 }
@@ -330,18 +330,23 @@ function calendar() {
   const picked = new Set(daily ? pickedDates() : []), tomorrow = day(state.now + 86400);
   $('#calHint').textContent = pick.mode === 'start' ? '달력에서 시작일을 눌러 주세요.'
     : pick.mode === 'end' ? '달력에서 종료일을 눌러 주세요. 시작일부터 1년 안에서 고를 수 있어요.'
-    : daily ? `운동하는 날 ${picked.size}일 · 요일이나 날짜를 눌러 넣고 뺄 수 있어요. 공휴일은 미리 빼 두었어요.`
+    : daily ? `운동하는 날 ${picked.size}일 · 요일이나 날짜를 눌러 넣고 뺄 수 있어요.${Object.keys(holidays).length ? ' 공휴일은 미리 빼 두었어요.' : ''}`
     : `${monthDay(pick.start)} ~ ${monthDay(end)} · ${duration}일씩 ${count}라운드가 쉬는 날 없이 이어져요.`;
   // 누를 수 있는 날: 시작일 고르기는 내일부터, 종료일 고르기는 시작일부터 1년, 그 밖에는 기간 안의 날짜
   const can = v => pick.mode === 'start' ? v >= tomorrow : pick.mode === 'end' ? v >= pick.start && v <= addDays(pick.start, 366) : daily && v >= pick.start && v <= end;
-  const tone = (w, v) => w === 0 || HOLIDAYS[v] ? 'red' : w === 6 ? 'blue' : '';
+  // 공휴일 표가 끝나는 해보다 뒤까지 걸친 기간이면, 표에 없는 해를 알려 줍니다(표를 못 읽었으면 기간의 모든 해).
+  const known = Math.max(0, ...Object.keys(holidays).map(v => +v.slice(0, 4))), missing = [];
+  for (let y = Math.max(+pick.start.slice(0, 4), known + 1); y <= +end.slice(0, 4); y++) missing.push(y);
+  $('#holidayNote').hidden = !daily || !missing.length;
+  $('#holidayNote').textContent = `${missing.join('·')}년 공휴일은 아직 반영되지 않았어요. 쉬는 날은 직접 빼 주세요.`;
+  const tone = (w, v) => w === 0 || holidays[v] ? 'red' : w === 6 ? 'blue' : '';
   const m = utc(pick.month);
   let html = `<div class="calnav"><button type="button" class="secondary" data-month="-1" aria-label="이전 달">‹</button><b>${m.getUTCFullYear()}년 ${m.getUTCMonth() + 1}월</b><button type="button" class="secondary" data-month="1" aria-label="다음 달">›</button></div>
     <div class="cal head">${weekdayNames.map((t, w) => daily ? `<button type="button" class="${tone(w)}" data-weekday="${w}" aria-pressed="${weekdaysOn.has(w)}">${t}</button>` : `<span class="${tone(w)}">${t}</span>`).join('')}</div>
     <div class="cal">${'<span></span>'.repeat(m.getUTCDay())}`;
   for (let d = new Date(m); d.getUTCMonth() === m.getUTCMonth(); d.setUTCDate(d.getUTCDate() + 1)) {
     const v = d.toISOString().slice(0, 10), inside = v >= pick.start && v <= end;
-    const attrs = `class="${tone(d.getUTCDay(), v)}"${HOLIDAYS[v] ? ` title="${HOLIDAYS[v]}"` : ''}`;
+    const attrs = `class="${tone(d.getUTCDay(), v)}"${holidays[v] ? ` title="${e(holidays[v])}"` : ''}`;
     html += can(v) ? `<button type="button" ${attrs} data-date="${v}" aria-pressed="${daily ? picked.has(v) : inside}">${d.getUTCDate()}</button>` : `<span ${attrs}${!daily && inside ? ' data-in' : ''}>${d.getUTCDate()}</span>`;
   }
   $('#dates').innerHTML = html + '</div>';
@@ -474,4 +479,5 @@ document.addEventListener('submit', async ev => {
   finally { if (btn) btn.disabled = false; }
 });
 
-load().catch(err => notify('불러오지 못했어요. ' + err.message));
+fetch('/holidays.json').then(r => r.ok ? r.json() : {}).then(h => { if (h && typeof h === 'object') holidays = h; }).catch(() => {})
+  .then(load).catch(err => notify('불러오지 못했어요. ' + err.message));

@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import unittest
 import uuid
 from unittest import mock
@@ -8,6 +9,33 @@ import auth
 from domain import RuleError, initial, migrate, view
 
 NOW = 1_800_000_000.0
+
+# 서버가 만드는 무작위 값의 자리와 형식입니다. 이 형식과 정확히 맞는 값만 가립니다.
+# 한계: 전체 경로가 아니라 키 이름과 값 형식만 봅니다. 경로 목록은 구조가 바뀔 때마다 어긋나고, 이 규칙을 피하려면 PIN을 형식이 맞는 값 안에 일부러 인코딩해야 해서 평범한 실수(원문 그대로 저장, 문구에 섞임)는 계속 잡기 때문입니다.
+UID, HEX32, HEX64 = (re.compile('[0-9a-f]{%d}' % n) for n in (10, 32, 64))
+VALUE_FORMS = {'salt': [HEX32], 'pin': [HEX64], 'key': [HEX64], 'invite': [re.compile('[A-Za-z0-9_-]{16}')], 'id': [re.compile('[0-9a-f]{12}'), HEX32],
+               **dict.fromkeys(('owner', 'actor', 'target', 'requester', 'judge', 'user', 'members'), [UID])}
+KEY_FORMS = {'sessions': HEX64, **dict.fromkeys(('users', 'names', 'records', 'versions'), UID)}
+
+
+def masked(value, name=None):
+    """서버가 만든 무작위 값(salt, 해시, 세션 키, 계정·리그·요청 id, 초대 코드)만 가린 사본입니다.
+
+    키 이름별 기대 형식과 정확히 맞는 값만 가립니다. pin 아래의 네 자리 원문처럼 형식이 다른 값이나, 다른 자리에 있는 16진수 모양 값은 그대로 둡니다.
+    """
+    if isinstance(value, dict):
+        form = KEY_FORMS.get(name)
+        # dict로 두면 가린 키끼리, 또는 가린 키와 원래 키가 겹쳐 뒤 항목이 앞 항목을 덮습니다. [키, 값] 쌍의 목록으로 두어 내용이 사라지지 않게 합니다.
+        return [['#' if form and form.fullmatch(k) else k, masked(v, k)] for k, v in value.items()]
+    if isinstance(value, list):
+        return [masked(v, name) for v in value]
+    return '#' if isinstance(value, str) and any(f.fullmatch(value) for f in VALUE_FORMS.get(name, ())) else value
+
+
+def leaked(state, *secrets):
+    """저장 상태 전체(무작위 값만 가린 사본)의 JSON 문자열에 들어 있는 비밀값들입니다. 없어야 정상입니다."""
+    saved = json.dumps(masked(state), ensure_ascii=False)
+    return [s for s in secrets if s in saved]
 
 
 class Accounts(unittest.TestCase):
@@ -19,13 +47,24 @@ class Accounts(unittest.TestCase):
     def setUp(self):
         self.state = copy.deepcopy(self.base)
 
+    def assert_pin_hashed(self, uid, pin):
+        """PIN이 평문으로 저장되지 않았는지 봅니다. 저장 상태 전체에서 찾되, 우연히 PIN 숫자열을 담을 수 있는 무작위 값은 가리고 찾습니다."""
+        user = self.state['users'][uid]
+        self.assertEqual(leaked(self.state, pin), [])
+        self.assertRegex(user['salt'], r'^[0-9a-f]{32}$')
+        self.assertRegex(user['pin'], r'^[0-9a-f]{64}$')
+        self.assertRegex(user['recovery']['salt'], r'^[0-9a-f]{32}$')
+        self.assertRegex(user['recovery']['key'], r'^[0-9a-f]{64}$')
+        self.assertEqual(auth.login(self.state, user['login'], pin, NOW), uid)
+
     def test_signup_rules(self):
         uid, key = auth.signup(self.state, ' New_Friend1 ', ' 새친구 ', '5555')
         user = self.state['users'][uid]
         self.assertEqual((user['login'], user['name']), ('new_friend1', '새친구'))
         self.assertRegex(key, r'^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}(-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}){2}$')
+        self.assert_pin_hashed(uid, '5555')
         saved = json.dumps(self.state)
-        for secret in ('5555', key, key.replace('-', '')):
+        for secret in (key, key.replace('-', '')):
             self.assertNotIn(secret, saved)
         for login, name, pin in [('abc', '이름', '5555'), ('a' * 21, '이름', '5555'), ('한글아이디', '이름', '5555'), ('has space', '이름', '5555'),
                                  ('dash-id', '이름', '5555'), (None, '이름', '5555'), ('new_friend1', '이름', '5555'), ('NEW_FRIEND1', '이름', '5555'),
@@ -40,6 +79,66 @@ class Accounts(unittest.TestCase):
         self.assertEqual((self.state['users'][twin]['name'], self.state['users'][wide]['name']), ('가람', 'Tom'))
         self.assertEqual(auth.login(self.state, ' TWIN ', '5555', NOW), twin)
         self.assertEqual(auth.login(self.state, 'garam', '1111', NOW), 'ga')
+
+    def test_pin_digits_inside_random_hex_do_not_fail_the_storage_check(self):
+        # salt가 우연히 PIN 숫자열을 담아도(여기서는 일부러 '5555…') 보안 문제가 아니므로 가입과 저장 검사가 통과해야 합니다.
+        with mock.patch('auth.secrets.token_hex', side_effect=lambda n: '5555' * (n // 2)):
+            uid, key = auth.signup(self.state, 'lucky', '우연', '5555')
+        self.assertIn('5555', json.dumps(self.state['users'][uid]))
+        self.assert_pin_hashed(uid, '5555')
+        # 계정 id, 세션 키, 리그·요청 id, 초대 코드에 PIN 숫자열이 들어가도 마찬가지입니다.
+        with mock.patch('auth.uuid.uuid4', return_value=uuid.UUID(hex='ab5555cdef'.ljust(32, '0'))):
+            other, _ = auth.signup(self.state, 'lucky2', '우연2', '5555')
+        self.assertEqual(other, 'ab5555cdef')
+        league = self.state['leagues'][0]
+        league['members'].append(other)
+        league['names'][other] = '우연2'
+        league['rounds'][0]['records'][other] = {'division': 'attendance'}
+        league['rounds'][0]['versions'][other] = 1
+        league['history'].append(dict(actor=other, action='리그 참가', at=NOW))
+        league['requests'].append(dict(id='5555' * 8, round='0', target=other, requester=other, judge=other, reason='확인'))
+        league.update(id='5555' * 3, invite='5555' * 4, owner=other)
+        self.state['sessions']['5555' * 16] = dict(user=other, at=NOW)
+        self.assertIn('5555', json.dumps(self.state['leagues']) + json.dumps(self.state['sessions']))
+        self.assert_pin_hashed(other, '5555')
+        self.assertNotIn(key, json.dumps(self.state))
+        with self.assertRaises(RuleError):
+            auth.login(self.state, 'lucky', '5556', NOW)
+
+    def test_pin_leak_anywhere_in_saved_state_is_caught(self):
+        uid, _ = auth.signup(self.state, 'owner', '주인', '5555')
+        token = auth.start_session(self.state, uid, NOW)
+        session = next(iter(self.state['sessions']))
+        self.assertEqual(leaked(self.state, '5555', '1111', token), [])
+        leaks = {
+            '세션': lambda s: s['sessions'][session].update(pin='5555'),
+            '다른 계정': lambda s: s['users']['ga'].update(memo='5555'),
+            '리그 이력': lambda s: s['leagues'][0]['history'].append(dict(actor=uid, action='로그인 5555', at=NOW)),
+            '중첩 필드': lambda s: s['users'][uid]['recovery'].update(extra={'deep': [{'x': '5555'}]}),
+            '접두 문구': lambda s: s['users'][uid].update(note='PIN=5555'),
+            # 가리는 자리라도 형식이 다르면 가려지지 않습니다.
+            'pin 자리의 원문': lambda s: s['users'][uid].update(pin='5555'),
+            'salt 자리의 원문': lambda s: s['users'][uid].update(salt='5555'),
+            '길이가 다른 16진수 salt': lambda s: s['users'][uid].update(salt='5555' * 4),
+            '복구 키 자리의 원문': lambda s: s['users'][uid]['recovery'].update(key='5555'),
+            '세션 키': lambda s: s['sessions'].update({'5555': dict(user=uid, at=NOW)}),
+            '세션의 계정': lambda s: s['sessions'][session].update(user='5555'),
+            '계정 id': lambda s: s['users'].update({'5555': s['users'][uid]}),
+            '명단': lambda s: s['leagues'][0]['members'].append('5555'),
+            '리그 id': lambda s: s['leagues'][0].update(id='5555'),
+            '초대 코드': lambda s: s['leagues'][0].update(invite='5555'),
+            # 무작위 값 자리가 아닌 곳의 16진수 모양 값은 면제하지 않습니다.
+            '다른 자리의 16진수': lambda s: s['users'][uid].update(name='ab5555cdef', memo='5555' * 16),
+            # 가려지는 키와 가린 표시('#', 예전의 '#0')와 같은 원래 키가 함께 있어도 서로 덮어쓰지 않습니다.
+            '가린 키와 같은 이름의 키 앞': lambda s: s.update(users={'ab5555cdef': dict(s['users'][uid], note='5555'), '#0': s['users']['ga'], '#': s['users']['na']}),
+            '가린 키와 같은 이름의 키 뒤': lambda s: s.update(users={'#0': s['users']['ga'], '#': s['users']['na'], 'abcdef0123': dict(s['users'][uid], note='5555')}),
+            '가려지는 키 여럿': lambda s: s.update(users={'abcdef0123': dict(s['users'][uid], note='5555'), 'abcdef0124': s['users'][uid], 'abcdef0125': s['users'][uid]}),
+            '숫자 값': lambda s: s['leagues'][0]['rounds'][0]['records'].update(ga={'division': 'rx', 'type': 'reps', 'value': 5555}),
+        }
+        for label, inject in leaks.items():
+            state = copy.deepcopy(self.state)
+            inject(state)
+            self.assertEqual(leaked(state, '5555'), ['5555'], label)
 
     def test_login_and_lockout(self):
         self.assertEqual(auth.login(self.state, 'garam', '1111', NOW), 'ga')

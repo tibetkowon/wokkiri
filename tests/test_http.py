@@ -1,7 +1,9 @@
 import http.client
 import json
 import tempfile
+import importlib.util
 import threading
+import types
 import unittest
 from datetime import datetime, timedelta
 from http.server import HTTPServer
@@ -10,13 +12,36 @@ from pathlib import Path
 import app
 from domain import KST
 
+# 저장 상태 전체에서 비밀값을 찾는 검사는 test_auth.py의 것을 같이 씁니다.
+spec = importlib.util.spec_from_file_location('leak_checks', Path(__file__).with_name('test_auth.py'))
+leak_checks = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(leak_checks)
+leaked = leak_checks.leaked
 
-class HTTPChecks(unittest.TestCase):
+
+def parts(value):
+    """JSON 값 안의 모든 dict 키와 문자열 값입니다."""
+    if isinstance(value, dict):
+        return set(value).union(*map(parts, value.values()))
+    if isinstance(value, list):
+        return set().union(*map(parts, value))
+    return {value} if isinstance(value, str) else set()
+
+
+class Server(unittest.TestCase):
+    """임시 DB로 서버를 띄웁니다. 시험용 회차는 DB를 만든 날 기준이라 도중에 한국 시간 자정을 넘기면 마감됩니다. 서버 시계를 상수 시각에 고정해 이를 막고, 저장되는 시각 숫자도 매번 같게 합니다."""
+
+    @classmethod
+    def clock(cls):
+        return datetime(2026, 11, 12, 12, tzinfo=KST).timestamp()
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.old = app.DB, app.DEMO
-        app.DB, app.DEMO = Path(cls.tmp.name) / 'test.sqlite3', True
+        cls.now = cls.clock()
+        cls.old = app.DB, app.DEMO, app.time
+        # app이 보는 time 이름만 바꿉니다. time.time 자체를 바꾸면 서버 로깅 등 프로세스 전체 시계가 멈춥니다.
+        app.DB, app.DEMO, app.time = Path(cls.tmp.name) / 'test.sqlite3', True, types.SimpleNamespace(time=lambda: cls.now)
         cls.server = HTTPServer(('127.0.0.1', 0), app.Handler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -26,7 +51,7 @@ class HTTPChecks(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join()
-        app.DB, app.DEMO = cls.old
+        app.DB, app.DEMO, app.time = cls.old
         cls.tmp.cleanup()
 
     def request(self, method, path, data=None, cookie=None, **headers):
@@ -46,6 +71,23 @@ class HTTPChecks(unittest.TestCase):
     def state(self, cookie=None):
         return self.request('GET', '/api/state', cookie=cookie)[2]
 
+    def assert_hashed(self, login, pin, *keys):
+        """저장 상태에 PIN·복구 키 평문이 없는지 봅니다. PIN은 저장 상태 전체에서 찾되, 우연히 그 숫자열을 담을 수 있는 무작위 값은 가리고 찾습니다."""
+        with app.connect() as db:
+            raw = db.execute('SELECT body FROM state').fetchone()[0]
+        saved = json.loads(raw)
+        user = next(u for u in saved['users'].values() if u['login'] == login)
+        self.assertEqual(leaked(saved, pin, 'DEMO', *keys), [])
+        for value, size in ((user['salt'], 32), (user['pin'], 64), (user['recovery']['salt'], 32), (user['recovery']['key'], 64)):
+            self.assertRegex(value, '^[0-9a-f]{%d}$' % size)
+        # 복구 키는 12글자라 우연히 겹칠 일이 없어 저장 내용 전체에서 찾습니다.
+        for key in keys:
+            self.assertNotIn(key, raw)
+        self.assertEqual(self.login(login, pin)[0], 200)
+
+
+class HTTPChecks(Server):
+
     def test_login_storage_and_boundaries(self):
         status, _, _ = self.request('POST', '/api/action', dict(action='join', invite='x'))
         self.assertEqual(status, 400)
@@ -59,7 +101,9 @@ class HTTPChecks(unittest.TestCase):
             self.assertIn(part, cookie)
         state = self.state(cookie)
         self.assertEqual((state['actor'], state['users']), ('ga', {'ga': '가람'}))
+        # 아이디는 조회 응답 어디에도 나가지 않습니다.
         self.assertNotIn('garam', json.dumps(state))
+        self.assertNotIn('login', parts(state))
         l = state['leagues'][0]
         rnd = l['rounds'][-1]
         data = dict(action='record', league=l['id'], round=rnd['id'], version=0, record=dict(division='rx', type='reps', value=50))
@@ -70,8 +114,7 @@ class HTTPChecks(unittest.TestCase):
         with app.connect() as db:
             saved = json.loads(db.execute('SELECT body FROM state').fetchone()[0])
         self.assertEqual(saved['leagues'][0]['rounds'][-1]['records']['ga']['value'], 50)
-        for secret in ('1111', 'DEMO'):
-            self.assertNotIn(secret, json.dumps(saved))
+        self.assert_hashed('garam', '1111', app.auth.DEMO_KEY, 'DEMODEMODEMO')
         status, _, _ = self.request('POST', '/api/action', data, cookie)
         self.assertEqual(status, 400)
         status, _, _ = self.request('GET', '/api/state', Host='evil.example')
@@ -86,7 +129,7 @@ class HTTPChecks(unittest.TestCase):
     def test_static_files_and_cache(self):
         web = Path(app.__file__).parent / 'web'
         for path, name, mime, cache in [('/', 'index.html', 'text/html; charset=utf-8', 'no-store'), ('/app.js', 'app.js', 'text/javascript; charset=utf-8', 'no-store'),
-                                        ('/qrcode.js', 'qrcode.js', 'text/javascript; charset=utf-8', 'no-store'), ('/logo.png', 'logo.png', 'image/png', 'public, max-age=86400')]:
+                                        ('/qrcode.js', 'qrcode.js', 'text/javascript; charset=utf-8', 'no-store'), ('/holidays.json', 'holidays.json', 'application/json', 'no-store'), ('/logo.png', 'logo.png', 'image/png', 'public, max-age=86400')]:
             con = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
             con.request('GET', path)
             res = con.getresponse()
@@ -99,7 +142,7 @@ class HTTPChecks(unittest.TestCase):
 
     def test_invite_join_and_hidden_leagues(self):
         _, ga, _ = self.login('garam', '1111')
-        start = (datetime.now(KST).date() + timedelta(days=2)).isoformat()
+        start = (datetime.fromtimestamp(self.now, KST).date() + timedelta(days=2)).isoformat()
         _, _, made = self.request('POST', '/api/action', dict(action='create', name='초대 시험', kind='daily', start=start, end=start, dates=[start]), ga)
         invite = next(l['invite'] for l in self.state(ga)['leagues'] if l['id'] == made['league'])
         # 계정 닉네임은 겹쳐도 가입되고, 아이디는 겹치면 안 됩니다.
@@ -173,10 +216,7 @@ class HTTPChecks(unittest.TestCase):
         self.assertNotEqual(body['recoveryKey'], signed['recoveryKey'])
         # 세션은 그대로이고, 키와 PIN 평문은 저장되지 않습니다.
         self.assertEqual(self.state(cookie)['users'], {self.state(cookie)['actor']: '재발급'})
-        with app.connect() as db:
-            saved = db.execute('SELECT body FROM state').fetchone()[0]
-        for secret in (body['recoveryKey'], signed['recoveryKey'], '5555'):
-            self.assertNotIn(secret, saved)
+        self.assert_hashed('renewer', '5555', body['recoveryKey'], signed['recoveryKey'])
         self.assertEqual(self.request('POST', '/api/recover', dict(login='renewer', key=signed['recoveryKey'], pin='9999'))[0], 400)
         # 실패 횟수는 요청 사이에도 남습니다. 위의 틀린 복구 키 1회에 틀린 PIN 4회를 더해 5회째에 잠기고, 잠긴 동안에는 맞는 PIN도 거부합니다.
         for _ in range(4):
@@ -185,6 +225,25 @@ class HTTPChecks(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn('분 뒤', err['error'])
         self.assertIn('분 뒤', self.login('renewer', '5555')[2]['error'])
+
+
+class MidnightChecks(Server):
+    """한국 시간 자정 1초 전에 고정해도 오늘 회차가 열려 있어 로그인과 기록 저장이 됩니다."""
+
+    @classmethod
+    def clock(cls):
+        return datetime(2027, 1, 1, tzinfo=KST).timestamp() - 1
+
+    def test_login_and_record_one_second_before_midnight(self):
+        status, cookie, _ = self.login('garam', '1111')
+        state = self.state(cookie)
+        self.assertEqual((status, state['actor'], state['now']), (200, 'ga', self.now))
+        l = state['leagues'][0]
+        rnd = l['rounds'][-1]
+        self.assertEqual((rnd['label'], rnd['close']), ('2026-12-31', self.now + 1))
+        data = dict(action='record', league=l['id'], round=rnd['id'], version=0, record=dict(division='rx', type='reps', value=50))
+        self.assertEqual(self.request('POST', '/api/action', data, cookie)[0], 200)
+        self.assertEqual(self.state(cookie)['leagues'][0]['rounds'][-1]['records']['ga']['value'], 50)
 
 
 if __name__ == '__main__':

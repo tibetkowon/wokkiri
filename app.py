@@ -15,7 +15,7 @@ ROOT = Path(__file__).parent
 DB = Path(os.environ.get('WOKKIRI_DB', str(ROOT / 'data' / 'wokkiri.sqlite3')))
 # 가상 회원(PIN 1111~4444, 복구 키 DEMO-DEMO-DEMO)과 예시 리그를 만듭니다. 누구나 아는 값이라 배포 서버에서는 켜지 않습니다.
 DEMO = os.environ.get('WOKKIRI_DEMO') == '1'
-FILES = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/logo.png': ('logo.png', 'image/png'), '/qrcode.js': ('qrcode.js', 'text/javascript; charset=utf-8')}
+FILES = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/logo.png': ('logo.png', 'image/png'), '/qrcode.js': ('qrcode.js', 'text/javascript; charset=utf-8'), '/holidays.json': ('holidays.json', 'application/json')}
 
 
 def fresh():
