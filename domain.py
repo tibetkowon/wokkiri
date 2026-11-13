@@ -3,11 +3,13 @@ import base64
 import copy
 import math
 import secrets
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone, date
 
 KST = timezone(timedelta(hours=9))
 DEMO_NAMES = {'ga': '가람', 'na': '나래', 'da': '다온', 'ra': '라온'}
+DEMO_LOGINS = {'ga': 'garam', 'na': 'narae', 'da': 'daon', 'ra': 'raon'}
 TYPES = {'time': '시간형', 'amrap': 'AMRAP', 'reps': '횟수형', 'weight': '중량형', 'done': '완료형'}
 
 
@@ -27,6 +29,12 @@ def stamp(day):
 def text(value, limit=1000):
     require(isinstance(value, str) and 0 < len(value.strip()) <= limit, '입력 길이를 확인해 주세요.')
     return value.strip()
+
+
+def clean(name):
+    """전각·제로폭 문자로 같은 닉네임을 하나 더 만들지 못하게 정규화합니다. shortcut: 모양만 같은 다른 문자(키릴 문자 등)는 막지 못합니다."""
+    name = unicodedata.normalize('NFKC', name)
+    return ''.join(c for c in name if unicodedata.category(c) not in ('Cc', 'Cf')).strip()
 
 
 def integer(value, low, high):
@@ -102,6 +110,8 @@ def round_scores(league, rnd):
 
 def view(league, now):
     result = copy.deepcopy(league)
+    # 없앤 기능(회원이 만들어 주던 PIN 초기화 코드)의 이력은 DB에만 두고 내려보내지 않습니다.
+    result['history'] = [h for h in result['history'] if 'member' not in h and h['action'] != 'PIN 초기화 코드 발급']
     # 이력의 사진 원본은 DB에만 두고 조회 응답에는 유무만 내려보냅니다.
     for h in result['history']:
         for k in ('before', 'after'):
@@ -174,8 +184,13 @@ def apply(state, actor, data, now):
         require(league is not None, '초대 링크를 확인해 주세요.')
         require(now < league['start'], '이미 시작한 리그라 참가할 수 없어요.')
         require(actor not in league['members'], '이미 참가하셨어요.')
+        # 계정 닉네임은 겹쳐도 되지만 한 리그 안에서는 겹치지 않게, 이 리그에서 쓸 닉네임을 따로 받을 수 있습니다.
+        name = data.get('name')
+        name = state['users'][actor]['name'] if name is None else text(clean(name) if isinstance(name, str) else name, 12)
+        taken = {clean(n).casefold() for n in league['names'].values()}
+        require(clean(name).casefold() not in taken, '이 리그에 같은 닉네임이 있어요. 다른 닉네임을 정해 주세요.')
         league['members'].append(actor)
-        league['names'][actor] = state['users'][actor]['name']
+        league['names'][actor] = name
         audit(league, actor, '리그 참가', now)
         return league['id']
     league = next((l for l in state['leagues'] if l['id'] == data.get('league')), None)
@@ -267,9 +282,19 @@ def initial(now):
 
 
 def migrate(state):
-    """계정이 없던 이전 로컬 DB를 닉네임·초대 구조로 올립니다. 여러 번 실행해도 같습니다."""
+    """이전 로컬 DB를 아이디·복구 키·초대 구조로 올립니다. 여러 번 실행해도 같습니다."""
     state.setdefault('users', {})
     state.setdefault('sessions', {})
+    for uid, user in state['users'].items():
+        # 닉네임으로 로그인하던 계정입니다. uid는 리그 명단·이력으로 다른 회원에게 보이므로 아이디로 쓰지 않고,
+        # 아무도 모르는 값을 넣어 로그인할 수 없게 둡니다. 복구 키도 없습니다(로컬 시험 데이터 한정).
+        # login이 uid와 같고 복구 키가 없는 계정은 이전 중간 수정본이 uid를 아이디로 채운 것이라 함께 바꿉니다.
+        # 가입 아이디도 10자리 16진수일 수 있어 login == uid만으로는 구분할 수 없으므로, 가입 계정에 항상 있는 복구 키로 가릅니다.
+        login = user.get('login')
+        if login is None or (login == uid and not user.get('recovery')):
+            user['login'] = DEMO_LOGINS.get(uid) or secrets.token_hex(8)
+        user.setdefault('recovery', None)
+        user.pop('reset', None)
     for league in state['leagues']:
         league.setdefault('names', {u: DEMO_NAMES.get(u, u) for u in league['members']})
         league.setdefault('invite', secrets.token_urlsafe(12))

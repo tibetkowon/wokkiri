@@ -159,6 +159,23 @@ class Rules(unittest.TestCase):
                 apply(self.state,'na',dict(action='join',league=l['id'],invite=bad),NOW)
         apply(self.state,'na',dict(action='join',invite=l['invite']),NOW)
         self.assertEqual(l['names'],{'ga':'가람','na':'나래'})
+        # 계정 닉네임은 겹칠 수 있지만 한 리그 안에서는 겹치지 않습니다. name을 주면 이 리그에서만 그 닉네임을 씁니다.
+        self.state['users']['da']['name']='가람'
+        for name in [None,'가람',' 가람 ','가\u200b람','나래','','가'*13,123]:
+            with self.assertRaises(ValueError,msg=name):
+                apply(self.state,'da',dict(action='join',invite=l['invite'],**({} if name is None else {'name':name})),NOW)
+        self.assertNotIn('da',l['members'])
+        apply(self.state,'da',dict(action='join',invite=l['invite'],name=' 가람2 '),NOW)
+        self.state['users']['ra']['name']='tom'
+        apply(self.state,'ra',dict(action='join',invite=l['invite']),NOW)
+        self.assertEqual(l['names'],{'ga':'가람','na':'나래','da':'가람2','ra':'tom'})
+        self.assertEqual(self.state['users']['da']['name'],'가람')
+        # \ub300\uc18c\ubb38\uc790\u00b7\uc804\uac01 \ucc28\uc774\ub294 \uac19\uc740 \ub2c9\ub124\uc784\uc73c\ub85c \ubd05\ub2c8\ub2e4.
+        l['members'].remove('ra'); del l['names']['ra']
+        l['names']['na']='TOM'
+        for extra in [{},{'name':'\uff34om'}]:
+            with self.assertRaises(ValueError):
+                apply(self.state,'ra',dict(action='join',invite=l['invite'],**extra),NOW)
         for actor in ['na',None]:
             with self.assertRaises(ValueError):
                 apply(self.state,actor,dict(action='join',invite=l['invite']),NOW)
@@ -172,6 +189,13 @@ class Rules(unittest.TestCase):
         self.assertIs(view(self.l,NOW)['history'][-1]['before']['photo'],True)
         with self.assertRaises(ValueError):
             self.run_action(action='guide',version=1,text='오래된 화면입니다.',photo='')
+
+    def test_view_hides_removed_pin_reset_history(self):
+        kept=dict(actor='na',action='리그 참가',at=NOW)
+        old=[dict(actor='ga',action='PIN 초기화 코드 발급',at=NOW,member='na'),dict(actor='ga',action='PIN 초기화 코드 발급',at=NOW),dict(actor='ga',action='다른 구형 표시',at=NOW,member='na')]
+        self.l['history']=[old[0],kept,old[1],old[2]]
+        self.assertEqual(view(self.l,NOW)['history'],[kept])
+        self.assertEqual(len(self.l['history']),4)
 
     def test_duplicate_request_and_version(self):
         self.request()

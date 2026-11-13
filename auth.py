@@ -1,19 +1,21 @@
-"""닉네임·PIN 가입, 로그인, 세션, PIN 초기화. 외부 서비스에 의존하지 않습니다."""
+"""아이디·PIN 가입, 로그인, 세션, 복구 키. 외부 서비스에 의존하지 않습니다."""
 import hashlib
 import hmac
 import math
 import re
 import secrets
-import unicodedata
 import uuid
 
-from domain import DEMO_NAMES, RuleError, audit, require, text
+from domain import DEMO_LOGINS, DEMO_NAMES, RuleError, audit, clean, require, text
 
 LOCK_AFTER, LOCK_SECONDS = 5, 600
 SESSION_SECONDS = 365 * 86400
-RESET_SECONDS = 86400
 DEMO_PINS = {'ga': '1111', 'na': '2222', 'da': '3333', 'ra': '4444'}
-WRONG = '닉네임 또는 PIN이 맞지 않아요.'
+DEMO_KEY = 'DEMO-DEMO-DEMO'
+# 0·O, 1·I처럼 헷갈리는 글자를 뺀 32자입니다. 12글자면 60비트입니다.
+KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+WRONG = '아이디 또는 PIN이 맞지 않아요.'
+WRONG_KEY = '아이디 또는 복구 키가 맞지 않아요.'
 
 
 def _hash(secret, salt):
@@ -30,48 +32,64 @@ def _pin(value):
     return value
 
 
-def clean(name):
-    """전각·제로폭 문자로 같은 닉네임을 하나 더 만들지 못하게 정규화합니다. shortcut: 모양만 같은 다른 문자(키릴 문자 등)는 막지 못합니다."""
-    name = unicodedata.normalize('NFKC', name)
-    return ''.join(c for c in name if unicodedata.category(c) not in ('Cc', 'Cf')).strip()
+def _login(value):
+    return value.strip().lower() if isinstance(value, str) else ''
 
 
-def _matches(state, name):
-    key = clean(name).casefold() if isinstance(name, str) else ''
-    return [u for u, v in state['users'].items() if clean(v['name']).casefold() == key]
+def find(state, login):
+    key = _login(login)
+    return next((u for u, v in state['users'].items() if v['login'] == key), None)
 
 
-def find(state, name):
-    # 같은 이름이 둘 이상이면(정규화 도입 전에 저장된 이름끼리 충돌) 아무도 고르지 않습니다.
-    found = _matches(state, name)
-    return found[0] if len(found) == 1 else None
-
-
-def _new(state, uid, name, pin):
+def _set_pin(user, pin):
     salt = secrets.token_hex(16)
-    state['users'][uid] = dict(name=name, salt=salt, pin=_hash(pin, salt), fails=0, lockUntil=0, reset=None)
-    return uid
+    user.update(salt=salt, pin=_hash(pin, salt), fails=0)
 
 
-def signup(state, name, pin):
+def _key_text(key):
+    return re.sub(r'[\s-]', '', key).upper()
+
+
+def _new_key(user, key=None):
+    """복구 키를 새로 정하고 평문을 돌려줍니다. 서버에는 해시만 남습니다."""
+    key = key or '-'.join(''.join(secrets.choice(KEY_ALPHABET) for _ in range(4)) for _ in range(3))
+    salt = secrets.token_hex(16)
+    user['recovery'] = dict(salt=salt, key=_hash(_key_text(key), salt))
+    return key
+
+
+def _new(state, uid, login, name, pin, key=None):
+    user = state['users'][uid] = dict(login=login, name=name, lockUntil=0)
+    _set_pin(user, pin)
+    return _new_key(user, key)
+
+
+def signup(state, login, name, pin):
+    """계정을 만들고 (uid, 복구 키 평문)을 돌려줍니다."""
+    login = _login(login)
+    require(re.fullmatch(r'[a-z0-9_]{4,20}', login), '아이디는 영문 소문자·숫자·밑줄 4~20자로 정해 주세요.')
     name = text(clean(name) if isinstance(name, str) else name, 12)
     _pin(pin)
-    require(not _matches(state, name), '이미 쓰는 닉네임이에요. 다른 닉네임을 골라 주세요.')
-    return _new(state, uuid.uuid4().hex[:10], name, pin)
+    require(find(state, login) is None, '이미 쓰는 아이디예요. 다른 아이디를 골라 주세요.')
+    uid = uuid.uuid4().hex[:10]
+    # uid는 리그 명단·이력으로 다른 회원에게 보입니다. 아이디와 같거나 이미 있는 uid면 다시 만듭니다.
+    while uid == login or uid in state['users']:
+        uid = uuid.uuid4().hex[:10]
+    return uid, _new(state, uid, login, name, pin)
 
 
 def add_demo_users(state):
-    # 로컬 시험 전용입니다. 누구나 아는 PIN이라 배포 서버에서는 WOKKIRI_DEMO를 켜지 않습니다.
+    # 로컬 시험 전용입니다. 누구나 아는 PIN·복구 키라 배포 서버에서는 WOKKIRI_DEMO를 켜지 않습니다.
     for uid, name in DEMO_NAMES.items():
-        if uid not in state['users']:
-            _new(state, uid, name, DEMO_PINS[uid])
+        if uid not in state['users'] and find(state, DEMO_LOGINS[uid]) is None:
+            _new(state, uid, DEMO_LOGINS[uid], name, DEMO_PINS[uid], DEMO_KEY)
 
 
 def _locked(user, now):
     require(now >= user['lockUntil'], f'{math.ceil((user["lockUntil"] - now) / 60)}분 뒤에 다시 시도해 주세요.')
 
 
-# shortcut: 닉네임만 알면 누구나 그 계정을 10분간 잠글 수 있습니다. 공개 운영에서 장난이 늘면 접속 주소별 제한을 더합니다.
+# shortcut: 아이디만 알면 누구나 그 계정을 10분간 잠글 수 있습니다. 공개 운영에서 장난이 늘면 접속 주소별 제한을 더합니다.
 def _fail(state, uid, now, message):
     user = state['users'][uid]
     user['fails'] += 1
@@ -83,42 +101,41 @@ def _fail(state, uid, now, message):
     raise RuleError(message)
 
 
-def login(state, name, pin, now):
-    uid = find(state, name)
+def login(state, login, pin, now):
+    uid = find(state, login)
     require(uid is not None and isinstance(pin, str), WRONG)
-    user = state['users'][uid]
-    _locked(user, now)
-    if not _same(pin, user['salt'], user['pin']):
-        _fail(state, uid, now, WRONG)
-    # 본인이 들어오면 누군가 발급해 둔 초기화 코드는 더 쓸 수 없습니다.
-    user['fails'], user['reset'] = 0, None
+    _check_pin(state, uid, pin, now, WRONG)
     return uid
 
 
-def reset(state, actor, target, now):
-    shared = [l for l in state['leagues'] if actor in l['members'] and target in l['members']]
-    require(target != actor and shared, '같은 리그 회원의 PIN만 초기화해 줄 수 있어요.')
-    code, salt = f'{secrets.randbelow(10**6):06d}', secrets.token_hex(16)
-    state['users'][target]['reset'] = dict(salt=salt, code=_hash(code, salt), until=now + RESET_SECONDS)
-    for key in [k for k, s in state['sessions'].items() if s['user'] == target]:
-        del state['sessions'][key]
-    for league in shared:
-        audit(league, actor, 'PIN 초기화 코드 발급', now, member=target)
-    return code
+def _check_pin(state, uid, pin, now, message):
+    user = state['users'][uid]
+    _locked(user, now)
+    if not (isinstance(pin, str) and _same(pin, user['salt'], user['pin'])):
+        _fail(state, uid, now, message)
+    user['fails'] = 0
 
 
-def recover(state, name, code, pin, now):
-    uid = find(state, name)
-    require(uid is not None and isinstance(code, str), '닉네임과 초기화 코드를 확인해 주세요.')
+def renew_key(state, uid, pin, now):
+    """로그인한 계정이 현재 PIN을 다시 넣으면 복구 키를 새로 만들어 평문을 돌려줍니다. 기존 키는 폐기하고 세션은 그대로 둡니다."""
+    _check_pin(state, uid, pin, now, 'PIN이 맞지 않아요.')
+    return _new_key(state['users'][uid])
+
+
+def recover(state, login, key, pin, now):
+    """복구 키로 PIN을 바꾸고 (uid, 새 복구 키 평문)을 돌려줍니다. 쓴 키는 폐기하고 기존 세션을 모두 끊습니다."""
+    uid = find(state, login)
+    require(uid is not None and isinstance(key, str), WRONG_KEY)
     _pin(pin)
     user = state['users'][uid]
     _locked(user, now)
-    r = user['reset']
-    if not (r and now < r['until'] and _same(code, r['salt'], r['code'])):
-        _fail(state, uid, now, '초기화 코드가 맞지 않거나 만료됐어요.')
-    salt = secrets.token_hex(16)
-    user.update(salt=salt, pin=_hash(pin, salt), fails=0, reset=None)
-    return uid
+    r = user['recovery']
+    if not (r and _same(_key_text(key), r['salt'], r['key'])):
+        _fail(state, uid, now, WRONG_KEY)
+    _set_pin(user, pin)
+    for token in [k for k, s in state['sessions'].items() if s['user'] == uid]:
+        del state['sessions'][token]
+    return uid, _new_key(user)
 
 
 def _digest(token):

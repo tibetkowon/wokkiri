@@ -13,7 +13,7 @@ from domain import RuleError, apply, initial, migrate, require, view
 
 ROOT = Path(__file__).parent
 DB = Path(os.environ.get('WOKKIRI_DB', str(ROOT / 'data' / 'wokkiri.sqlite3')))
-# 가상 회원(PIN 1111~4444)과 예시 리그를 만듭니다. 누구나 아는 PIN이라 배포 서버에서는 켜지 않습니다.
+# 가상 회원(PIN 1111~4444, 복구 키 DEMO-DEMO-DEMO)과 예시 리그를 만듭니다. 누구나 아는 값이라 배포 서버에서는 켜지 않습니다.
 DEMO = os.environ.get('WOKKIRI_DEMO') == '1'
 FILES = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/logo.png': ('logo.png', 'image/png')}
 
@@ -61,7 +61,7 @@ def change(fn, keep=False):
 
 
 def prepare():
-    """이전 로컬 DB를 계정 구조로 올리고, 시험 모드면 가상 회원을 채웁니다."""
+    """이전 로컬 DB를 아이디·복구 키 구조로 올리고, 시험 모드면 가상 회원을 채웁니다."""
     def go(state, now):
         migrate(state)
         if DEMO:
@@ -103,9 +103,8 @@ class Handler(BaseHTTPRequestHandler):
             actor = auth.session_user(state, self.token(), now)
             # 참여 중인 리그만 내려보냅니다. 다른 리그는 초대 링크를 아는 사람만 볼 수 있습니다.
             leagues = [view(l, now) for l in state['leagues'] if actor in l['members']]
-            users = {u: n for l in leagues for u, n in l['names'].items()}
-            if actor:
-                users[actor] = state['users'][actor]['name']
+            # 리그 안 닉네임은 각 리그의 names에 있습니다. 여기에는 본인 계정 닉네임만 담고 아이디는 내보내지 않습니다.
+            users = {actor: state['users'][actor]['name']} if actor else {}
             return self.send(200, dict(actor=actor, users=users, leagues=leagues, now=now))
         if url.path == '/api/invite':
             code = parse_qs(url.query).get('t', [''])[0]
@@ -131,25 +130,28 @@ class Handler(BaseHTTPRequestHandler):
             token, path = self.token(), self.path
             if path in ('/api/signup', '/api/login', '/api/recover'):
                 def enter(state, now):
+                    key = None
                     if path == '/api/signup':
-                        uid = auth.signup(state, data.get('name'), data.get('pin'))
+                        uid, key = auth.signup(state, data.get('login'), data.get('name'), data.get('pin'))
                     elif path == '/api/login':
-                        uid = auth.login(state, data.get('name'), data.get('pin'), now)
+                        uid = auth.login(state, data.get('login'), data.get('pin'), now)
                     else:
-                        uid = auth.recover(state, data.get('name'), data.get('code'), data.get('pin'), now)
+                        uid, key = auth.recover(state, data.get('login'), data.get('key'), data.get('pin'), now)
                     auth.end_session(state, token)
-                    return auth.start_session(state, uid, now)
-                # 틀린 PIN 횟수는 오류가 나도 저장해야 잠금이 동작합니다.
-                return self.send(200, {'ok': True}, cookie=session_cookie(change(enter, keep=True)))
+                    return auth.start_session(state, uid, now), key
+                # 틀린 PIN·복구 키 횟수는 오류가 나도 저장해야 잠금이 동작합니다.
+                session, key = change(enter, keep=True)
+                # 복구 키 평문은 이 응답에서 한 번만 나갑니다.
+                return self.send(200, {'ok': True, 'recoveryKey': key} if key else {'ok': True}, cookie=session_cookie(session))
             if path == '/api/logout':
                 change(lambda state, now: auth.end_session(state, token))
                 return self.send(200, {'ok': True}, cookie=session_cookie('', 0))
-            if path == '/api/reset':
-                def issue(state, now):
+            if path == '/api/recovery-key':
+                def renew(state, now):
                     actor = auth.session_user(state, token, now)
                     require(actor, '먼저 로그인해 주세요.')
-                    return auth.reset(state, actor, data.get('target'), now)
-                return self.send(200, {'code': change(issue)})
+                    return auth.renew_key(state, actor, data.get('pin'), now)
+                return self.send(200, {'ok': True, 'recoveryKey': change(renew, keep=True)})
             if path != '/api/action':
                 return self.send(404, {'error': '작업을 찾을 수 없습니다.'})
             lid = change(lambda state, now: apply(state, auth.session_user(state, token, now), data, now))
@@ -166,5 +168,6 @@ if __name__ == '__main__':
     server = HTTPServer(('127.0.0.1', port), Handler)
     print(f'와끼리 로컬 MVP: http://127.0.0.1:{port}', flush=True)
     if DEMO:
-        print('가상 회원(닉네임/PIN): 가람/1111 나래/2222 다온/3333 라온/4444', flush=True)
+        # 아이디·PIN·복구 키 값은 로그에 남기지 않습니다. README에 있습니다.
+        print('시험 모드(WOKKIRI_DEMO=1): 가상 회원과 예시 리그가 있습니다. 로그인 정보는 README를 보세요.', flush=True)
     server.serve_forever()

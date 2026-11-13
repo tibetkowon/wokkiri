@@ -1,9 +1,20 @@
 const $ = s => document.querySelector(s);
 const e = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let state, selected = null, tab = 'ranking', roundId = null, timer;
-// 초대 링크(/?join=코드)로 들어왔는지, 로그인 화면의 모드, 방금 만든 PIN 초기화 코드입니다.
+// 초대 링크(/?join=코드)로 들어왔는지, 로그인 화면의 모드, 방금 받아 아직 저장 확인을 안 한 복구 키, 초대받은 리그에서 닉네임이 겹쳤는지입니다.
 const inviteToken = new URLSearchParams(location.search).get('join');
-let invite = null, authMode = inviteToken ? 'signup' : 'login', resetInfo = null;
+let invite = null, authMode = inviteToken ? 'signup' : 'login', recoveryKey = null, needNick = false;
+// 복구 키를 받고 아직 "계속하기"로 확인하지 않았다는 표시입니다. 키 평문은 메모리(recoveryKey)에만 두고,
+// 새로고침해도 확인 단계를 건너뛰지 않도록 sessionStorage에는 이 표시(비밀값 아님)만 남깁니다.
+let keyPending = false;
+try { keyPending = sessionStorage.getItem('keyPending') === '1'; } catch {}
+function setKeyPending(on) {
+  keyPending = on;
+  if (!on) recoveryKey = null;
+  try { on ? sessionStorage.setItem('keyPending', '1') : sessionStorage.removeItem('keyPending'); } catch {}
+}
+// 열어 본 리그에서 쓰는 닉네임(리그마다 다를 수 있음)입니다.
+let names = {};
 // 새 리그 달력: 날짜는 (요일이 켜짐) XOR (개별로 뒤집음)일 때 선택입니다.
 let weekdaysOn = new Set([1, 2, 3, 4, 5]), flipped = new Set();
 let pick = null;
@@ -23,7 +34,7 @@ const format = o => n => new Date(n*1000).toLocaleString('ko-KR', {timeZone:'Asi
 const dateTime = format({month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false});
 const dateOnly = format({month:'numeric', day:'numeric'});
 const day = n => new Date(n*1000 + 9*3600000).toISOString().slice(0, 10);
-const name = u => e(state.users[u]);
+const name = u => e(names[u]);
 // 선택지가 적고 고정된 항목은 한눈에 보이는 버튼 묶음으로, 회원 목록처럼 길어지는 항목만 select로 둡니다.
 const choices = (legend, field, items, current, cls = '') => {
   const on = items.some(([v]) => v === current) ? current : items[0][0];
@@ -51,37 +62,70 @@ async function load() {
     invite = await api('/api/invite?t=' + encodeURIComponent(inviteToken)).catch(() => false);
     if (!invite) notify('초대 링크가 올바르지 않아요. 보내 준 친구에게 다시 물어봐 주세요.');
   }
-  if (inviteToken && invite && state.actor) await enterInvited();
+  if (!state.actor && keyPending) setKeyPending(false);
+  // 복구 키 확인(계속하기)을 마친 뒤에 리그 참가로 넘어갑니다.
+  if (inviteToken && invite && state.actor && !keyPending && !needNick) await enterInvited();
   render();
 }
 
 // 초대 링크로 들어온 로그인 회원은 그 리그에 넣고 바로 열어 줍니다. 한 번만 처리합니다.
-async function enterInvited() {
+async function enterInvited(nick) {
   try {
     let l = state.leagues.find(x => x.invite === inviteToken);
     if (!l) {
-      const joined = await api('/api/action', {action:'join', invite:inviteToken});
+      const joined = await api('/api/action', {action:'join', invite:inviteToken, name:nick});
       state = await api('/api/state');
       l = state.leagues.find(x => x.id === joined.league);
     }
     selected = l.id; tab = 'ranking'; roundId = null;
-  } catch (err) { notify(err.message); }
-  invite = false;
+  } catch (err) {
+    notify(err.message);
+    // 닉네임이 겹친 경우(서버 문구로 구분)에는 초대를 버리지 않고 이 리그에서 쓸 닉네임을 묻습니다.
+    if (err.message.includes('같은 닉네임')) { needNick = true; return; }
+  }
+  leaveInvite();
+}
+
+function leaveInvite() {
+  needNick = false; invite = false;
   history.replaceState(null, '', '/');
+}
+
+// 현재 PIN을 다시 넣어 복구 키를 새로 받는 폼입니다. 받으면 이전 키는 못 쓰게 됩니다.
+const renewForm = label => `<form id="renew"><label>현재 PIN (숫자 4자리)<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password" required></label><button>${label}</button></form>`;
+
+function keyView(app) {
+  // 확인 전에 새로고침하면 키가 메모리에서 사라집니다. 서버에도 평문이 없어 다시 보여 줄 수 없습니다.
+  if (!recoveryKey) {
+    app.innerHTML = `<h1>복구 키를 다시 보여 드릴 수 없어요</h1>
+      <p class="notice"><strong>복구 키 화면이 닫혔어요.</strong><br>복구 키는 한 번만 보여 드려서 다시 보여 드릴 수 없어요. 저장해 두지 않았다면 PIN을 입력해 새 복구 키를 받아 주세요. 복구 키가 없으면 PIN을 잊었을 때 계정을 되찾을 수 없어요.</p>
+      ${renewForm('새 복구 키 받기')}<button class="secondary" data-continue>계속하기</button>`;
+    return;
+  }
+  app.innerHTML = `<h1>복구 키를 저장해 주세요</h1><p class="notice"><b class="code">${e(recoveryKey)}</b></p>
+    <button class="secondary" data-copy>복구 키 복사</button>
+    <p class="sub">스크린샷이나 메모 등 안전한 곳에 저장해 주세요. 다시 보여 드릴 수 없고, PIN을 잊으면 이 키가 있어야 계정을 되찾을 수 있어요.</p>
+    <label><input type="checkbox" id="saved">저장했어요</label><button data-continue disabled>계속하기</button>`;
+}
+
+function nickView(app) {
+  app.innerHTML = `<h1>이 리그에서 쓸 닉네임</h1><p class="notice"><strong>${e(invite.name)}</strong>에 같은 닉네임을 쓰는 회원이 있어요.<br><span class="sub">이 리그에서만 쓸 닉네임을 정해 주세요. 계정 닉네임은 그대로예요.</span></p>
+    <form id="nick"><label>이 리그에서 쓸 닉네임 (12자 이내)<input name="name" maxlength="12" required></label><button>참가하기</button></form>
+    <button class="link" data-skip>참가하지 않기</button>`;
 }
 
 function authView(app) {
   const field = (label, field, attrs) => `<label>${label}<input name="${field}" ${attrs} required></label>`;
-  const nick = field('닉네임', 'name', 'maxlength="12" autocomplete="username"');
+  const id = label => field(label, 'login', 'maxlength="20" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false"');
   const pin = (label, auto) => field(label, 'pin', `type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="${auto}"`);
   const card = invite ? `<p class="notice"><strong>${e(invite.name)}</strong>에 초대받았어요.<br><span class="sub">${kindNames[invite.kind]} · ${invite.members}명 · ${invite.open ? `${dateOnly(invite.start)} 시작 전까지 참가할 수 있어요` : '이미 시작해서 참가할 수 없어요'}</span></p>` : '';
   const forms = {
-    login: `<form id="login">${nick}${pin('PIN (숫자 4자리)', 'current-password')}<button>로그인</button></form>`,
-    signup: `<form id="signup">${nick}${pin('PIN (숫자 4자리)', 'new-password')}<p class="sub">이메일 같은 개인정보는 받지 않아요. PIN은 다른 기기에서 다시 들어올 때 써요. 잊어도 같은 리그 친구가 초기화해 줄 수 있어요.</p><button>가입하고 시작하기</button></form>`,
-    recover: `<form id="recover">${nick}${field('초기화 코드 (숫자 6자리)', 'code', 'inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"')}${pin('새 PIN (숫자 4자리)', 'new-password')}<p class="sub">같은 리그 친구에게 "내 PIN 초기화 코드 만들어 줘"라고 부탁해 주세요. 리그의 순위 탭에서 만들 수 있어요.</p><button>새 PIN 정하기</button></form>`,
+    login: `<form id="login">${id('아이디')}${pin('PIN (숫자 4자리)', 'current-password')}<button>로그인</button></form>`,
+    signup: `<form id="signup">${id('아이디 (영문 소문자·숫자·밑줄 4~20자)')}${field('닉네임 (12자 이내)', 'name', 'maxlength="12" autocomplete="nickname"')}${pin('PIN (숫자 4자리)', 'new-password')}<p class="sub">이메일 같은 개인정보는 받지 않아요. 아이디는 로그인할 때만 쓰고, 다른 회원에게는 닉네임만 보여요. 가입하면 PIN을 잊었을 때 쓸 복구 키를 드려요.</p><button>가입하고 시작하기</button></form>`,
+    recover: `<form id="recover">${id('아이디')}${field('복구 키', 'key', 'maxlength="20" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"')}${pin('새 PIN (숫자 4자리)', 'new-password')}<p class="sub">가입할 때 저장해 둔 복구 키를 넣어 주세요. 새 PIN을 정하면 복구 키도 새로 드리고, 로그인해 둔 다른 기기는 모두 로그아웃돼요.</p><button>새 PIN 정하기</button></form>`,
   };
   const tabs = `<nav class="tabs" aria-label="로그인 방식">${[['login', '로그인'], ['signup', '가입']].map(([v, t]) => `<button data-auth="${v}" class="${authMode === v ? 'active' : ''}">${t}</button>`).join('')}</nav>`;
-  app.innerHTML = `<h1>친구끼리 여는 리그</h1><p class="sub">닉네임과 PIN 4자리만 있으면 돼요.</p>${card}${authMode === 'recover' ? '<h2>PIN을 잊었어요</h2>' : tabs}${forms[authMode]}${authMode === 'recover' ? '<button class="link" data-auth="login">‹ 로그인으로 돌아가기</button>' : '<button class="link" data-auth="recover">PIN을 잊었어요</button>'}`;
+  app.innerHTML = `<h1>친구끼리 여는 리그</h1><p class="sub">아이디와 PIN 4자리만 있으면 돼요.</p>${card}${authMode === 'recover' ? '<h2>PIN을 잊었어요</h2>' : tabs}${forms[authMode]}${authMode === 'recover' ? '<button class="link" data-auth="login">‹ 로그인으로 돌아가기</button>' : '<button class="link" data-auth="recover">PIN을 잊었어요</button>'}`;
 }
 
 function describe(r) {
@@ -134,11 +178,14 @@ function readRecord(form) {
 
 function render() {
   const app = $('#app'), me = state.actor;
-  $('#who').innerHTML = me ? `${name(me)} · <button class="link" data-logout>로그아웃</button>` : '';
+  $('#who').innerHTML = me ? `${e(state.users[me])} · <button class="link" data-logout>로그아웃</button>` : '';
+  if (keyPending) { keyView(app); return; }
   if (!me) { authView(app); return; }
+  if (needNick) { nickView(app); return; }
   if (selected === 'new') { createView(app); return; }
   const l = state.leagues.find(x => x.id === selected);
   if (!l?.rounds) { leagueList(app); return; }
+  names = l.names;
   const mine = l.requests.filter(q => waiting(q, me)).length;
   const tabs = [['ranking','순위'], ['round','기록'], ['requests', mine ? `요청 ${mine}` : '요청'], ['history','이력']];
   app.innerHTML = `<button class="link" data-back>‹ 리그 목록</button><h1>${e(l.name)}</h1>
@@ -151,7 +198,8 @@ function render() {
 
 function leagueList(app) {
   const item = x => `<li><div><b>${e(x.name)}</b><span class="sub">${kindNames[x.kind]} · ${x.members.length}명 · ${x.start > state.now ? `${dateOnly(x.start)} 시작` : '진행 중'}</span></div><button class="secondary" data-open="${x.id}">보기</button></li>`;
-  app.innerHTML = `<h1>리그</h1>${state.leagues.length ? `<ul class="leagues">${state.leagues.map(item).join('')}</ul>` : '<p class="sub">아직 참여 중인 리그가 없어요. 새 리그를 만들거나, 친구가 보내 준 초대 링크로 들어와 주세요.</p>'}<button data-new>새 리그 만들기</button>`;
+  app.innerHTML = `<h1>리그</h1>${state.leagues.length ? `<ul class="leagues">${state.leagues.map(item).join('')}</ul>` : '<p class="sub">아직 참여 중인 리그가 없어요. 새 리그를 만들거나, 친구가 보내 준 초대 링크로 들어와 주세요.</p>'}<button data-new>새 리그 만들기</button>
+    <details><summary>복구 키 다시 만들기</summary><p class="sub">복구 키를 잃어버렸거나 저장하지 못했다면 PIN을 입력해 새로 받아 주세요. 새 키를 받으면 이전 키는 쓸 수 없어요.</p>${renewForm('새 복구 키 받기')}</details>`;
 }
 
 function createView(app) {
@@ -202,20 +250,20 @@ function roundPanel(l, panel) {
     <section><h2>회차 기록</h2><table><thead><tr><th>회원</th><th>기록</th><th>점수</th></tr></thead><tbody>${s.order.map(row).join('')}</tbody></table>
       <p class="sub">참여하지 않으면 ${l.members.length}점이에요.${started && open && !s.mismatch ? ' 마감 전 점수는 바뀔 수 있어요.' : ''}</p>
       ${started && state.now < l.requestClose && targets.length ? `<details><summary>기록 수정 요청하기</summary><form id="request">
-        <label>누구 기록인가요?<select name="target">${options(targets.map(u => [u, u === me ? `${state.users[u]} (본인)` : state.users[u]]))}</select></label>
+        <label>누구 기록인가요?<select name="target">${options(targets.map(u => [u, u === me ? `${names[u]} (본인)` : names[u]]))}</select></label>
         ${choices('어떤 요청인가요?', 'invalidate', [['no','기록을 고쳐 주세요'], ['yes','잘못 올라온 기록이에요 (삭제 요청)']], 'no', 'invalidate')}
         <div class="proposal"><p class="sub">이렇게 고치면 좋겠다 싶은 기록을 적어 주세요.</p>${recordFields(l.kind === 'daily')}</div>
         <label>이유<textarea name="reason" required maxlength="1000"></textarea></label>
         <label>확인해 줄 회원 (판정자)<select name="judge"></select></label><button>요청 보내기</button></form></details>` : ''}</section>`;
   panel.querySelector('.days .active').scrollIntoView({inline:'center', block:'nearest'});
-  const names = ['division', 'type', 'finished'], rec = $('#record'), req = $('#request');
+  const fields = ['division', 'type', 'finished'], rec = $('#record'), req = $('#request');
   if (rec) {
     syncFields(rec, own);
-    rec.addEventListener('change', ev => { if (names.includes(ev.target.name)) syncFields(rec, ev.target.name === 'type' ? {} : undefined); });
+    rec.addEventListener('change', ev => { if (fields.includes(ev.target.name)) syncFields(rec, ev.target.name === 'type' ? {} : undefined); });
   }
   if (req) {
     syncRequest(req, l, rnd);
-    req.addEventListener('change', ev => { if (ev.target.name === 'target') syncRequest(req, l, rnd); else if (ev.target.name === 'invalidate') req.querySelector('.proposal').hidden = ev.target.value === 'yes'; else if (names.includes(ev.target.name)) syncFields(req, ev.target.name === 'type' ? {} : undefined); });
+    req.addEventListener('change', ev => { if (ev.target.name === 'target') syncRequest(req, l, rnd); else if (ev.target.name === 'invalidate') req.querySelector('.proposal').hidden = ev.target.value === 'yes'; else if (fields.includes(ev.target.name)) syncFields(req, ev.target.name === 'type' ? {} : undefined); });
   }
 }
 
@@ -227,17 +275,12 @@ function syncRequest(f, l, rnd) {
   if (self) f.elements.invalidate.value = 'no';
   f.querySelector('.proposal').hidden = f.elements.invalidate.value === 'yes';
   const eligible = l.members.filter(u => u !== state.actor && u !== target);
-  f.elements.judge.innerHTML = eligible.length ? options(eligible.map(u => [u, state.users[u]])) : '<option value="">없음 (2명 리그)</option>';
+  f.elements.judge.innerHTML = eligible.length ? options(eligible.map(u => [u, names[u]])) : '<option value="">없음 (2명 리그)</option>';
 }
 
 function rankingPanel(l, panel) {
-  const others = l.members.filter(u => u !== state.actor);
-  const help = !others.length ? '' : `<details ${resetInfo ? 'open' : ''}><summary>친구가 로그인하지 못하나요?</summary>
-    <p class="sub">PIN을 잊은 친구가 있으면 초기화 코드를 만들어 전해 주세요. 친구가 로그인 화면의 "PIN을 잊었어요"에서 코드를 넣고 새 PIN을 정하면 돼요. 코드는 24시간 동안만 쓸 수 있고 이력에 남아요. 만들면 그 친구가 로그인해 둔 기기는 모두 로그아웃돼요.</p>
-    ${resetInfo ? `<p class="notice"><strong>${name(resetInfo.user)}</strong> 님의 초기화 코드<br><b class="code">${resetInfo.code}</b></p>` : ''}
-    <ul class="leagues">${others.map(u => `<li><b>${name(u)}</b><button class="secondary" data-reset="${u}">초기화 코드 만들기</button></li>`).join('')}</ul></details>`;
   panel.innerHTML = `<section><table><thead><tr><th>순위</th><th>회원</th><th>누적 점수</th></tr></thead><tbody>${l.standings.map(r => `<tr class="${r.user === state.actor ? 'me' : ''}"><td class="num">${r.rank}</td><td>${name(r.user)}</td><td>${r.points}</td></tr>`).join('')}</tbody></table>
-    <p class="sub">점수가 낮을수록 순위가 높아요. ${l.rounds.length}회차 중 ${l.rounds.filter(r => r.counted).length}회차가 반영됐어요. 아직 시작하지 않은 회차와 WOD 방식이 엇갈린 회차는 빠져 있어요.</p>${help}</section>`;
+    <p class="sub">점수가 낮을수록 순위가 높아요. ${l.rounds.length}회차 중 ${l.rounds.filter(r => r.counted).length}회차가 반영됐어요. 아직 시작하지 않은 회차와 WOD 방식이 엇갈린 회차는 빠져 있어요.</p></section>`;
 }
 
 function requestsPanel(l, panel) {
@@ -255,7 +298,6 @@ function historyPanel(l, panel) {
   const rec = r => e(r ? describe(r) : '없음');
   const detail = h => h.request ? `${label(h.request.round)} · ${parties(h.request)}${h.request.decision ? ' · ' + e(h.request.decision) : ''}`
     : h.target ? `${label(h.round)} · ${name(h.target)} · ${rec(h.before)} → ${rec(h.after)}`
-    : h.member ? name(h.member)
     : h.round !== undefined ? label(h.round) + (h.before.photo !== h.after.photo ? ' · 사진 변경' : '')
     : '';
   panel.innerHTML = `<section>${l.history.length ? `<ul class="log">${l.history.slice().reverse().map(h => `<li><time>${dateTime(h.at)}</time><b>${name(h.actor)}</b> ${e(h.action)}<br><span class="sub">${detail(h)}</span></li>`).join('')}</ul>` : '아직 변경 이력이 없어요.'}</section>`;
@@ -296,7 +338,13 @@ document.addEventListener('click', async ev => {
   const b = ev.target.closest('button');
   if (!b) return;
   try {
-    if (b.hasAttribute('data-logout')) { await api('/api/logout', {}); selected = null; roundId = null; tab = 'ranking'; resetInfo = null; await load(); }
+    if (b.hasAttribute('data-logout')) { await api('/api/logout', {}); selected = null; roundId = null; tab = 'ranking'; setKeyPending(false); needNick = false; await load(); }
+    else if (b.hasAttribute('data-copy')) {
+      try { await navigator.clipboard.writeText(recoveryKey); notify('복구 키를 복사했어요. 안전한 곳에 붙여 넣어 주세요.'); }
+      catch { prompt('이 복구 키를 복사해서 안전한 곳에 저장해 주세요.', recoveryKey); }
+    }
+    else if (b.hasAttribute('data-continue')) { setKeyPending(false); await load(); }
+    else if (b.hasAttribute('data-skip')) { leaveInvite(); render(); }
     else if (b.dataset.auth) { authMode = b.dataset.auth; render(); }
     else if (b.hasAttribute('data-back')) { selected = null; await load(); }
     else if (b.hasAttribute('data-new')) { selected = 'new'; render(); }
@@ -305,11 +353,6 @@ document.addEventListener('click', async ev => {
       const url = `${location.origin}/?join=${state.leagues.find(l => l.id === selected).invite}`;
       try { await navigator.clipboard.writeText(url); notify('초대 링크를 복사했어요. 단톡방에 붙여 넣어 주세요.'); }
       catch { prompt('이 링크를 복사해서 친구에게 보내 주세요.', url); }
-    }
-    else if (b.dataset.reset) {
-      const issued = await api('/api/reset', {target:b.dataset.reset});
-      resetInfo = {user:b.dataset.reset, code:issued.code};
-      await load();
     }
     else if (b.dataset.round) { roundId = b.dataset.round; await load(); }
     else if (b.hasAttribute('data-attend')) {
@@ -348,11 +391,12 @@ document.addEventListener('click', async ev => {
       calendar();
     }
     // 다른 회원의 변경이 보이도록 탭을 옮길 때마다 다시 불러옵니다.
-    else if (b.dataset.tab) { tab = b.dataset.tab; resetInfo = null; await load(); }
+    else if (b.dataset.tab) { tab = b.dataset.tab; await load(); }
   } catch (err) { notify(err.message); }
 });
 
 document.addEventListener('change', ev => {
+  if (ev.target.id === 'saved') $('[data-continue]').disabled = !ev.target.checked;
   if (ev.target.closest('#create') && ev.target.name !== 'name') calendar();
 });
 
@@ -364,12 +408,22 @@ document.addEventListener('submit', async ev => {
   try {
     if (btn) btn.disabled = true;
     if (['login', 'signup', 'recover'].includes(f.id)) {
+      // 폼에 없는 칸은 undefined라 요청에서 빠집니다.
       const v = n => f.elements[n]?.value;
-      await api('/api/' + f.id, f.id === 'recover' ? {name:v('name'), code:v('code'), pin:v('pin')} : {name:v('name'), pin:v('pin')});
+      const entered = await api('/api/' + f.id, {login:v('login'), name:v('name'), key:v('key'), pin:v('pin')});
+      recoveryKey = entered.recoveryKey || null;
+      if (recoveryKey) setKeyPending(true);
       authMode = 'login';
       await load();
       return;
     }
+    if (f.id === 'renew') {
+      recoveryKey = (await api('/api/recovery-key', {pin:f.elements.pin.value})).recoveryKey;
+      setKeyPending(true);
+      render();
+      return;
+    }
+    if (f.id === 'nick') { await enterInvited(f.elements.name.value); render(); return; }
     if (f.id === 'create') Object.assign(data, {action:'create', name:f.elements.name.value, kind:f.elements.kind.value, start:pick.start, end:pick.end, dates:f.elements.kind.value === 'daily' ? pickedDates() : [], count:Number(f.elements.count.value), duration:Number(f.elements.duration.value)});
     else if (f.id === 'record') Object.assign(data, {action:'record', record:readRecord(f), version:rnd.versions[state.actor] || 0});
     else if (f.id === 'guide') {

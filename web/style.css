@@ -42,7 +42,7 @@ button:disabled{opacity:.45;cursor:default}
 
 .notice{margin:14px 0 0;padding:10px 12px;border-left:3px solid var(--warn);background:#fff;font-size:13.5px}
 .notice strong{color:var(--warn)}
-.code{font-size:26px;letter-spacing:4px;font-variant-numeric:tabular-nums}
+.code{display:block;font-size:24px;letter-spacing:2px;text-align:center;overflow-wrap:anywhere;user-select:all}
 .ok{font-weight:600}
 
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
