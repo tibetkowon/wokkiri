@@ -112,11 +112,6 @@ def view(league, now):
     result = copy.deepcopy(league)
     # 없앤 기능(회원이 만들어 주던 PIN 초기화 코드)의 이력은 DB에만 두고 내려보내지 않습니다.
     result['history'] = [h for h in result['history'] if 'member' not in h and h['action'] != 'PIN 초기화 코드 발급']
-    # 이력의 사진 원본은 DB에만 두고 조회 응답에는 유무만 내려보냅니다.
-    for h in result['history']:
-        for k in ('before', 'after'):
-            if isinstance(h.get(k), dict) and 'photo' in h[k]:
-                h[k]['photo'] = bool(h[k]['photo'])
     totals = {u: 0 for u in league['members']}
     pending = False
     for rnd in result['rounds']:
@@ -150,6 +145,17 @@ def put(league, rnd, target, proposal, actor, now, reason):
     rnd['records'][target] = proposal
     rnd['versions'][target] = rnd['versions'].get(target, 0) + 1
     audit(league, actor, reason, now, round=rnd['id'], target=target, before=before, after=proposal)
+
+
+def stash(state, league, photo):
+    """data URL 사진을 검사해 state['photos']에 잠시 싣고 id를 돌려줍니다. app.change가 꺼내 사진 테이블에 넣으므로 상태 JSON에는 id만 남습니다."""
+    prefix, encoded = photo.split(',', 1)
+    raw = base64.b64decode(encoded, validate=True)
+    require(len(raw) <= 2*1024*1024, '사진은 2MB 이하로 선택해 주세요.')
+    require(((prefix == 'data:image/png;base64' and raw.startswith(b'\x89PNG\r\n\x1a\n')) or (prefix == 'data:image/jpeg;base64' and raw.startswith(b'\xff\xd8\xff'))), 'PNG 또는 JPEG 사진을 선택해 주세요.')
+    pid = uuid.uuid4().hex
+    state.setdefault('photos', {})[pid] = dict(league=league['id'], mime=prefix[5:-7], body=raw)
+    return pid
 
 
 def schedule(data):
@@ -213,14 +219,14 @@ def apply(state, actor, data, now):
         require(isinstance(content, str) and len(content) <= 4000, '안내는 4,000자 이내로 작성해 주세요.')
         photo = data.get('photo', '')
         require(isinstance(photo, str) and len(photo) <= 2800000, '사진은 2MB 이하로 선택해 주세요.')
-        if photo:
-            prefix, encoded = photo.split(',', 1)
-            raw = base64.b64decode(encoded, validate=True)
-            require(len(raw) <= 2*1024*1024 and ((prefix == 'data:image/png;base64' and raw.startswith(b'\x89PNG\r\n\x1a\n')) or (prefix == 'data:image/jpeg;base64' and raw.startswith(b'\xff\xd8\xff'))), 'PNG 또는 JPEG 사진을 선택해 주세요.')
         before = rnd['guide']
+        # 지금 사진의 id를 그대로 보내면 유지, 빈 값이면 삭제, 그 밖에는 새로 올린 data URL입니다.
+        if photo and photo != before['photo']:
+            photo = stash(state, league, photo)
         rnd['guide'] = dict(text=content, photo=photo)
         rnd['guideVersion'] += 1
-        audit(league, actor, 'WOD 수정', now, round=rnd['id'], before=before, after=rnd['guide'])
+        # 이력에는 사진 유무만 남깁니다. 바뀌거나 지워진 사진은 app.change가 테이블에서 지웁니다.
+        audit(league, actor, 'WOD 수정', now, round=rnd['id'], before=dict(before, photo=bool(before['photo'])), after=dict(rnd['guide'], photo=bool(photo)))
     elif action == 'request':
         require(now < league['rounds'][-1]['close'] + 72*3600, '신규 요청 접수가 마감되었습니다.')
         target = data.get('target')
@@ -282,7 +288,7 @@ def initial(now):
 
 
 def migrate(state):
-    """이전 로컬 DB를 아이디·복구 키·초대 구조로 올립니다. 여러 번 실행해도 같습니다."""
+    """이전 로컬 DB를 아이디·복구 키·초대 구조로 올리고, 상태 안의 사진(data URL)을 사진 테이블로 보냅니다. 여러 번 실행해도 같습니다."""
     state.setdefault('users', {})
     state.setdefault('sessions', {})
     for uid, user in state['users'].items():
@@ -298,4 +304,12 @@ def migrate(state):
     for league in state['leagues']:
         league.setdefault('names', {u: DEMO_NAMES.get(u, u) for u in league['members']})
         league.setdefault('invite', secrets.token_urlsafe(12))
+        # 이력 속 옛 사진 본문은 화면에 나간 적이 없어 유무 표시로 바꾸고, 지금 보이는 안내 사진만 옮깁니다.
+        for h in league['history']:
+            for k in ('before', 'after'):
+                if isinstance(h.get(k), dict) and 'photo' in h[k]:
+                    h[k]['photo'] = bool(h[k]['photo'])
+        for rnd in league['rounds']:
+            if rnd['guide']['photo'].startswith('data:'):
+                rnd['guide']['photo'] = stash(state, league, rnd['guide']['photo'])
     return state

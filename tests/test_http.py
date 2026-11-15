@@ -1,10 +1,13 @@
+import base64
 import http.client
 import json
+import sqlite3
 import tempfile
 import importlib.util
 import threading
 import types
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta
 from http.server import HTTPServer
 from pathlib import Path
@@ -230,6 +233,149 @@ class HTTPChecks(Server):
         self.assertEqual(status, 400)
         self.assertIn('분 뒤', err['error'])
         self.assertIn('분 뒤', self.login('renewer', '5555')[2]['error'])
+
+
+PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+
+
+def url(raw, mime='image/png'):
+    return f'data:{mime};base64,' + base64.b64encode(raw).decode()
+
+
+def rows():
+    with app.connect() as db:
+        return db.execute('SELECT id, league, mime, body FROM photos ORDER BY id').fetchall()
+
+
+def saved():
+    with app.connect() as db:
+        return db.execute('SELECT body FROM state').fetchone()[0]
+
+
+class PhotoChecks(Server):
+    """사진은 상태 JSON 밖 사진 테이블에 두고, 그 리그 회원에게만 내려보냅니다."""
+
+    def photo(self, pid, cookie=None):
+        con = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
+        con.request('GET', f'/photo/{pid}', headers={'Cookie': cookie} if cookie else {})
+        res = con.getresponse()
+        out = res.status, res.getheader('Content-Type'), res.getheader('Cache-Control'), res.read()
+        con.close()
+        return out
+
+    def guide(self, cookie, index, photo):
+        l = self.state(cookie)['leagues'][0]
+        rnd = l['rounds'][index]
+        status, _, body = self.request('POST', '/api/action', dict(action='guide', league=l['id'], round=rnd['id'], version=rnd['guideVersion'], text='WOD', photo=photo), cookie)
+        return status, body.get('error'), self.state(cookie)['leagues'][0]['rounds'][index]['guide']['photo']
+
+    def test_upload_access_replace_and_remove(self):
+        _, ga, _ = self.login('garam', '1111')
+        status, _, pid = self.guide(ga, 0, url(PNG))
+        self.assertEqual(status, 200)
+        self.assertRegex(pid, '^[0-9a-f]{32}$')
+        # 상태 JSON에는 id만 있고 사진 본문은 테이블에 있습니다.
+        self.assertNotIn('base64', saved())
+        self.assertNotIn('photos', json.loads(saved()))
+        self.assertEqual(rows(), [(pid, 'local-demo', 'image/png', PNG)])
+        self.assertEqual(self.photo(pid, ga), (200, 'image/png', 'private, max-age=86400', PNG))
+        # 같은 리그의 다른 회원은 받고, 비로그인과 다른 리그 회원은 받지 못합니다.
+        _, na, _ = self.login('narae', '2222')
+        self.assertEqual(self.photo(pid, na)[3], PNG)
+        _, other, _ = self.request('POST', '/api/signup', dict(login='outsider', name='밖', pin='5555'))
+        start = (datetime.fromtimestamp(self.now, KST).date() + timedelta(days=2)).isoformat()
+        self.assertEqual(self.request('POST', '/api/action', dict(action='create', name='다른 리그', kind='daily', start=start, end=start, dates=[start]), other)[0], 200)
+        for cookie in (None, other, 'wokkiri=wrong'):
+            self.assertEqual(self.photo(pid, cookie)[0], 404)
+        self.assertEqual([self.photo(p, ga)[0] for p in ('', '0' * 32, 'x/../y')], [404, 404, 404])
+        # 글만 고치면 사진은 그대로이고, 다른 사진으로 바꾸면 옛 사진은 지워져 주소로도 받을 수 없습니다.
+        self.assertEqual(self.guide(ga, 0, pid), (200, None, pid))
+        self.assertEqual([r[0] for r in rows()], [pid])
+        jpeg = b'\xff\xd8\xff' + b'0' * 20
+        status, _, second = self.guide(na, 0, url(jpeg, 'image/jpeg'))
+        self.assertEqual(rows(), [(second, 'local-demo', 'image/jpeg', jpeg)])
+        self.assertEqual((self.photo(pid, ga)[0], self.photo(second, ga)[:2]), (404, (200, 'image/jpeg')))
+        # 지우면 고아가 남지 않고, 이력에는 사진 유무만 남습니다.
+        self.assertEqual(self.guide(ga, 0, ''), (200, None, ''))
+        self.assertEqual(rows(), [])
+        history = json.loads(saved())['leagues'][0]['history']
+        self.assertEqual([(h['before']['photo'], h['after']['photo']) for h in history if h['action'] == 'WOD 수정'][-4:], [(False, True), (True, True), (True, True), (True, False)])
+        self.assertNotIn(pid, saved())
+
+    def test_size_and_league_total_limits(self):
+        _, ga, _ = self.login('garam', '1111')
+        big = b'\x89PNG\r\n\x1a\n' + bytes(2 * 1024 * 1024)
+        self.assertEqual(self.guide(ga, 1, url(big)), (400, '사진은 2MB 이하로 선택해 주세요.', ''))
+        self.assertEqual(self.guide(ga, 1, 'data:image/svg+xml;base64,AAAA'), (400, 'PNG 또는 JPEG 사진을 선택해 주세요.', ''))
+        with mock.patch.object(app, 'PHOTO_TOTAL', len(PNG) + 10):
+            status, _, first = self.guide(ga, 1, url(PNG))
+            self.assertEqual(status, 200)
+            before = saved()
+            status, error, photo = self.guide(ga, 2, url(PNG))
+            self.assertEqual((status, photo), (400, ''))
+            self.assertIn('50MB', error)
+            # 거부된 요청은 상태도 사진도 남기지 않습니다.
+            self.assertEqual((saved(), [r[0] for r in rows()]), (before, [first]))
+            # 한도에 찬 리그도 있던 사진을 바꾸는 것은 됩니다(옛 사진이 먼저 빠집니다).
+            status, _, second = self.guide(ga, 1, url(PNG))
+            self.assertEqual((status, [r[0] for r in rows()]), (200, [second]))
+        self.assertEqual(self.guide(ga, 1, ''), (200, None, ''))
+        self.assertEqual(rows(), [])
+
+
+class PhotoMigration(unittest.TestCase):
+    """상태 JSON 안에 사진을 두던 DB를 서버 시작 처리(prepare)로 올립니다."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for name, value in (('DB', Path(tmp.name) / 'old.sqlite3'), ('DEMO', True)):
+            patch = mock.patch.object(app, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def old_db(self, state):
+        """사진 테이블이 없던 이전 형식 DB를 만듭니다."""
+        with closing(sqlite3.connect(app.DB)) as db:
+            db.execute('CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)')
+            db.execute('INSERT INTO state VALUES (1, ?)', (json.dumps(state),))
+            db.commit()
+
+    def test_old_photos_move_once_and_nothing_else_changes(self):
+        old = app.fresh()
+        league = old['leagues'][0]
+        gone, kept = url(b'\xff\xd8\xff' + b'old', 'image/jpeg'), url(PNG)
+        league['rounds'][0]['guide'] = dict(text='첫 안내', photo=kept)
+        league['rounds'][1]['guide'] = dict(text='둘째 안내', photo=kept)
+        league['history'] += [dict(actor='ga', action='WOD 수정', at=1, round='0', before=dict(text='', photo=''), after=dict(text='옛 안내', photo=gone)),
+                              dict(actor='ga', action='WOD 수정', at=2, round='0', before=dict(text='옛 안내', photo=gone), after=dict(text='첫 안내', photo=kept))]
+        self.old_db(old)
+        app.prepare()
+        state = json.loads(saved())
+        ids = [r['guide']['photo'] for r in state['leagues'][0]['rounds']]
+        # 지금 보이는 안내 사진은 그대로 옮겨지고, 이력 속 옛 사진 본문은 유무 표시로 바뀝니다.
+        self.assertEqual((len(set(ids[:2])), ids[2]), (2, ''))
+        self.assertEqual(sorted(rows()), sorted((i, 'local-demo', 'image/png', PNG) for i in ids[:2]))
+        self.assertEqual([(h['before']['photo'], h['after']['photo']) for h in state['leagues'][0]['history'][-2:]], [(False, True), (True, True)])
+        self.assertNotIn('base64', saved())
+        # 사진 말고는 바뀐 것이 없습니다.
+        for s in (state, old):
+            for rnd in s['leagues'][0]['rounds']:
+                rnd['guide']['photo'] = bool(rnd['guide']['photo'])
+            for h in s['leagues'][0]['history'][-2:]:
+                h['before']['photo'], h['after']['photo'] = bool(h['before']['photo']), bool(h['after']['photo'])
+        self.assertEqual(state, old)
+        # 두 번째 실행은 아무것도 바꾸지 않습니다.
+        once = saved(), rows()
+        app.prepare()
+        self.assertEqual((saved(), rows()), once)
+
+    def test_db_without_photos(self):
+        self.old_db(app.fresh())
+        app.prepare()
+        once = saved()
+        app.prepare()
+        self.assertEqual((saved(), rows()), (once, []))
 
 
 class DeployChecks(Server):

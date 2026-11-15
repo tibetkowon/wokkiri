@@ -1,4 +1,6 @@
+import base64
 import importlib.util
+import json
 import sqlite3
 import stat
 import subprocess
@@ -7,8 +9,10 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 import app
+from domain import apply
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location('backup', ROOT / 'scripts' / 'backup.py')
@@ -44,6 +48,17 @@ class BackupChecks(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             backup.backup(self.db, self.dir, now=1000000000)
         self.assertEqual(body(made), '첫 상태')
+
+    def test_backup_contains_photos(self):
+        # 서버가 올린 사진은 같은 파일의 사진 테이블에 있어 백업에 함께 담깁니다.
+        png = b'\x89PNG\r\n\x1a\n' + b'photo'
+        with mock.patch.object(app, 'DB', self.dir.parent / 'server.sqlite3'), mock.patch.object(app, 'DEMO', True):
+            app.prepare()
+            app.change(lambda state, now: apply(state, 'ga', dict(action='guide', league='local-demo', round='0', version=0, text='WOD', photo='data:image/png;base64,' + base64.b64encode(png).decode()), now))
+            made = backup.backup(app.DB, self.dir, now=1000000000)
+        with closing(sqlite3.connect(made)) as db:
+            pid = json.loads(db.execute('SELECT body FROM state').fetchone()[0])['leagues'][0]['rounds'][0]['guide']['photo']
+            self.assertEqual(db.execute('SELECT id, league, mime, body FROM photos').fetchall(), [(pid, 'local-demo', 'image/png', png)])
 
     def test_keeps_newest_and_fails_cleanly(self):
         made = [backup.backup(self.db, self.dir, keep=2, now=1000000000 + i * 86400) for i in range(4)]

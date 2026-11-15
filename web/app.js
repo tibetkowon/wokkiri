@@ -255,7 +255,7 @@ function roundPanel(l, panel) {
   panel.innerHTML = `<nav class="days" aria-label="${l.kind === 'daily' ? '날짜' : '라운드'} 선택">${l.rounds.map(chip).join('')}</nav>
     <p class="sub">기록 마감 ${dateTime(rnd.close)}${started ? (open ? '' : ' · 마감됨') : ' · 시작 전'}</p>
     ${s.mismatch ? `<p class="notice"><strong>확인이 필요해요. WOD 방식이 서로 달라서 점수를 잠시 보류했어요.</strong><br>${Object.entries(s.counts).map(([t, n]) => `${typeNames[t]} ${n}명`).join(' · ')}<br>방식이 하나로 맞춰지면 바로 다시 계산돼요. 기록을 올린 분은 마감 뒤에도 본인 기록을 고칠 수 있어요.</p>` : ''}
-    <section><h2>WOD</h2><p class="guide">${e(rnd.guide.text) || '<span class="sub">아직 WOD가 올라오지 않았어요.</span>'}</p>${rnd.guide.photo ? `<img class="photo" src="${e(rnd.guide.photo)}" alt="WOD 사진">` : ''}
+    <section><h2>WOD</h2><p class="guide">${e(rnd.guide.text) || '<span class="sub">아직 WOD가 올라오지 않았어요.</span>'}</p>${rnd.guide.photo ? `<img class="photo" src="/photo/${e(rnd.guide.photo)}" alt="WOD 사진">` : ''}
       ${started ? `<details><summary>WOD 편집</summary><form id="guide"><label>WOD 내용<textarea name="text" maxlength="4000">${e(rnd.guide.text)}</textarea></label><label>사진 (PNG/JPEG, 2MB 이하)<input name="photo" type="file" accept="image/png,image/jpeg"></label>${rnd.guide.photo ? '<label><input name="remove" type="checkbox">기존 사진 삭제</label>' : ''}<button class="secondary">WOD 저장</button></form></details>` : ''}</section>
     ${!direct ? '' : l.kind === 'daily' && !own
       ? '<section><h2>내 기록</h2><p class="sub">출석을 누르면 기록을 적을 수 있어요. 출석만 해도 점수가 들어가요.</p><button data-attend>출석</button></section>'
@@ -446,6 +446,7 @@ document.addEventListener('submit', async ev => {
     if (f.id === 'create') Object.assign(data, {action:'create', name:f.elements.name.value, kind:f.elements.kind.value, start:pick.start, end:pick.end, dates:f.elements.kind.value === 'daily' ? pickedDates() : [], count:Number(f.elements.count.value), duration:Number(f.elements.duration.value)});
     else if (f.id === 'record') Object.assign(data, {action:'record', record:readRecord(f), version:rnd.versions[state.actor] || 0});
     else if (f.id === 'guide') {
+      // 사진을 바꾸지 않으면 지금 사진의 id를 그대로 보냅니다.
       let photo = rnd.guide.photo;
       const file = f.elements.photo.files[0];
       if (file) {

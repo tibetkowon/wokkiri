@@ -206,9 +206,21 @@ class Rules(unittest.TestCase):
     def test_guide_photo_history_and_version(self):
         photo='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
         self.run_action(action='guide',version=0,text='오늘의 와드입니다.',photo=photo)
-        self.run_action('na',action='guide',version=1,text='안내를 수정했습니다.',photo='')
+        # 상태에는 id만 남고, 본문은 app.change가 가져갈 state['photos']에 실립니다.
+        pid=self.r['guide']['photo']
+        self.assertRegex(pid,'^[0-9a-f]{32}$')
+        stored=self.state.pop('photos')
+        self.assertEqual((list(stored),stored[pid]['league'],stored[pid]['mime'],stored[pid]['body'][:4]),([pid],self.l['id'],'image/png',b'\x89PNG'))
+        self.assertNotIn('base64',repr(self.state))
+        # id를 그대로 보내면 사진을 유지하고 새로 싣지 않습니다. 다른 문자열은 사진으로 받지 않습니다.
+        self.run_action('na',action='guide',version=1,text='글만 고쳤습니다.',photo=pid)
+        self.assertEqual((self.r['guide']['photo'],'photos' in self.state),(pid,False))
+        with self.assertRaises(ValueError):
+            self.run_action(action='guide',version=2,text='남의 사진',photo='0'*32)
+        self.run_action('na',action='guide',version=2,text='안내를 수정했습니다.',photo='')
         self.assertEqual(self.r['guide']['photo'],'')
-        self.assertEqual(self.l['history'][-1]['before']['photo'],photo)
+        # 이력에는 사진 본문 없이 유무만 남습니다.
+        self.assertEqual([(h['before']['photo'],h['after']['photo']) for h in self.l['history']],[(False,True),(True,True),(True,False)])
         self.assertIs(view(self.l,NOW)['history'][-1]['before']['photo'],True)
         with self.assertRaises(ValueError):
             self.run_action(action='guide',version=1,text='오래된 화면입니다.',photo='')

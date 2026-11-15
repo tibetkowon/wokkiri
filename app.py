@@ -23,6 +23,8 @@ TRUST_PROXY = os.environ.get('WOKKIRI_TRUST_PROXY') == '1'
 HOST = os.environ.get('WOKKIRI_HOST')
 # 접속 주소별 제한: 묶음 이름 -> (횟수, 초). 테스트는 이 값을 바꿔 씁니다.
 LIMITS = dict(signup=(10, 3600), enter=(30, 600))
+# 리그 하나가 올려 둘 수 있는 사진 총량입니다. 사진 한 장 한도(2MB)는 domain.stash가 봅니다.
+PHOTO_TOTAL = 50 * 1024 * 1024
 LIMITED = {'/api/signup': 'signup', '/api/login': 'enter', '/api/recover': 'enter', '/api/recovery-key': 'enter'}
 # shortcut: 요청 시각을 메모리에만 두어 재시작하면 초기화됩니다. 서버 프로세스를 둘 이상으로 늘리면 공유 저장소로 옮깁니다.
 hits, swept = {}, [0.0]
@@ -40,8 +42,10 @@ def fresh():
 def connect():
     DB.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(DB)
-    # shortcut: 로컬 소규모 상태만 단일 행에 저장하며, 실제 다중 사용자 운영 전에 테이블을 분리합니다.
+    # shortcut: 사진을 뺀 상태 전체를 한 행 JSON으로 둡니다. 회원·리그가 크게 늘거나 서버를 멀티스레드로 바꾸면 리그·기록 테이블로 나눕니다.
     db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)')
+    # 사진 본문은 상태 JSON에 넣지 않고 여기에 둡니다. 같은 파일이라 백업 한 번에 함께 담깁니다.
+    db.execute('CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, league TEXT NOT NULL, mime TEXT NOT NULL, body BLOB NOT NULL, created REAL NOT NULL)')
     if db.execute('SELECT 1 FROM state WHERE id=1').fetchone() is None:
         db.execute('INSERT OR IGNORE INTO state VALUES (1, ?)', (json.dumps(fresh()),))
     db.commit()
@@ -53,18 +57,28 @@ def load():
         return json.loads(db.execute('SELECT body FROM state WHERE id=1').fetchone()[0])
 
 
-def change(fn, keep=False):
-    """상태를 한 트랜잭션으로 바꿉니다. keep이면 규칙 오류가 나도 바뀐 상태(로그인 실패 횟수)를 저장합니다."""
+def change(fn, keep=False, quota=True):
+    """상태를 한 트랜잭션으로 바꿉니다. keep이면 규칙 오류가 나도 바뀐 상태(로그인 실패 횟수)를 저장합니다. quota를 끄면(이전 DB 올리기) 사진 총량을 보지 않습니다."""
     with connect() as db:
+        # 쓰기 잠금을 먼저 잡아, 읽고 고쳐 쓰는 사이에 다른 변경이 끼어들지 못합니다.
         db.execute('BEGIN IMMEDIATE')
         state = json.loads(db.execute('SELECT body FROM state WHERE id=1').fetchone()[0])
         error = None
         try:
-            result = fn(state, time.time())
+            now = time.time()
+            result = fn(state, now)
         except RuleError as err:
             if not keep:
                 raise
             result, error = None, err
+        # domain이 새로 올린 사진을 테이블로 옮기고, 어느 안내도 가리키지 않는 사진(교체·삭제된 것)은 지웁니다.
+        new = state.pop('photos', {})
+        db.executemany('INSERT INTO photos VALUES (?, ?, ?, ?, ?)', [(pid, p['league'], p['mime'], p['body'], now) for pid, p in new.items()])
+        used = {r['guide']['photo'] for l in state['leagues'] for r in l['rounds']}
+        db.executemany('DELETE FROM photos WHERE id=?', [row for row in db.execute('SELECT id FROM photos').fetchall() if row[0] not in used])
+        for league in {p['league'] for p in new.values()} if quota else ():
+            total = db.execute('SELECT SUM(LENGTH(body)) FROM photos WHERE league=?', (league,)).fetchone()[0] or 0
+            require(total <= PHOTO_TOTAL, '이 리그의 사진이 모두 합쳐 50MB를 넘어요. 다른 회차의 사진을 지운 뒤 다시 올려 주세요.')
         db.execute('UPDATE state SET body=? WHERE id=1', (json.dumps(state, ensure_ascii=False),))
     if error:
         raise error
@@ -72,12 +86,12 @@ def change(fn, keep=False):
 
 
 def prepare():
-    """이전 로컬 DB를 아이디·복구 키 구조로 올리고, 시험 모드면 가상 회원을 채웁니다."""
+    """이전 로컬 DB를 아이디·복구 키 구조로 올리고 상태 안의 사진을 사진 테이블로 옮기며, 시험 모드면 가상 회원을 채웁니다."""
     def go(state, now):
         migrate(state)
         if DEMO:
             auth.add_demo_users(state)
-    change(go)
+    change(go, quota=False)
 
 
 def session_cookie(token, age=auth.SESSION_SECONDS):
@@ -149,6 +163,17 @@ class Handler(BaseHTTPRequestHandler):
             if league is None:
                 return self.send(404, {'error': '초대 링크를 확인해 주세요.'})
             return self.send(200, dict(name=league['name'], kind=league['kind'], start=league['start'], members=len(league['members']), open=time.time() < league['start']))
+        if url.path.startswith('/photo/'):
+            pid, state, now = url.path[7:], load(), time.time()
+            actor = auth.session_user(state, self.token(), now)
+            # 로그인한 회원이 참여 중인 리그에서 지금 안내에 걸린 사진만 내려보냅니다.
+            shown = pid and actor and any(r['guide']['photo'] == pid for l in state['leagues'] if actor in l['members'] for r in l['rounds'])
+            with connect() as db:
+                row = shown and db.execute('SELECT mime, body FROM photos WHERE id=?', (pid,)).fetchone()
+            if not row:
+                return self.send(404, {'error': '사진을 찾을 수 없어요.'})
+            # id마다 내용이 바뀌지 않으므로 본인 브라우저에만 하루 캐시합니다.
+            return self.send(200, row[1], row[0], cache='private, max-age=86400')
         if url.path not in FILES:
             return self.send(404, {'error': '페이지를 찾을 수 없습니다.'})
         name, mime = FILES[url.path]
