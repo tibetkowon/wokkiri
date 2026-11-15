@@ -8,6 +8,7 @@ import unittest
 from datetime import datetime, timedelta
 from http.server import HTTPServer
 from pathlib import Path
+from unittest import mock
 
 import app
 from domain import KST
@@ -39,7 +40,10 @@ class Server(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.now = cls.clock()
-        cls.old = app.DB, app.DEMO, app.time
+        cls.old = app.DB, app.DEMO, app.time, app.LIMITS
+        # 한 반의 요청이 모두 같은 주소·같은 시각이라 접속 주소별 제한에 걸립니다. 제한 검사는 DeployChecks가 값을 낮춰서 합니다.
+        app.LIMITS = dict(signup=(10 ** 6, 3600), enter=(10 ** 6, 600))
+        app.hits.clear()
         # app이 보는 time 이름만 바꿉니다. time.time 자체를 바꾸면 서버 로깅 등 프로세스 전체 시계가 멈춥니다.
         app.DB, app.DEMO, app.time = Path(cls.tmp.name) / 'test.sqlite3', True, types.SimpleNamespace(time=lambda: cls.now)
         cls.server = HTTPServer(('127.0.0.1', 0), app.Handler)
@@ -51,7 +55,8 @@ class Server(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join()
-        app.DB, app.DEMO, app.time = cls.old
+        app.DB, app.DEMO, app.time, app.LIMITS = cls.old
+        app.hits.clear()
         cls.tmp.cleanup()
 
     def request(self, method, path, data=None, cookie=None, **headers):
@@ -225,6 +230,88 @@ class HTTPChecks(Server):
         self.assertEqual(status, 400)
         self.assertIn('분 뒤', err['error'])
         self.assertIn('분 뒤', self.login('renewer', '5555')[2]['error'])
+
+
+class DeployChecks(Server):
+    """배포 설정: Secure 쿠키, 공개 주소, 접속 주소별 제한, 프록시 헤더."""
+
+    def setUp(self):
+        app.hits.clear()
+        self.addCleanup(setattr, type(self), 'now', self.now)
+
+    def wrong(self, **headers):
+        """없는 아이디로 로그인합니다. 제한에 안 걸리면 400이고 계정 잠금은 건드리지 않습니다."""
+        return self.request('POST', '/api/login', dict(login='nobody', pin='0000'), **headers)[0]
+
+    def test_secure_cookie_only_when_enabled(self):
+        _, cookie, _ = self.login('garam', '1111')
+        self.assertNotIn('Secure', cookie)
+        with mock.patch.object(app, 'SECURE', True):
+            _, cookie, _ = self.login('garam', '1111')
+            self.assertIn('; Secure', cookie)
+            self.assertIn('; Secure', self.request('POST', '/api/logout', {}, cookie)[1])
+
+    def test_public_host_and_https_origin(self):
+        local = f'127.0.0.1:{self.server.server_port}'
+        with mock.patch.object(app, 'HOST', 'wokkiri.example.com'):
+            self.assertEqual(self.request('GET', '/api/state')[0], 403)
+            self.assertEqual(self.request('GET', '/api/state', Host='wokkiri.example.com')[0], 200)
+            self.assertEqual(self.wrong(Host='wokkiri.example.com', Origin='https://wokkiri.example.com'), 400)
+            self.assertEqual(self.wrong(Host='wokkiri.example.com'), 400)
+            for origin in ('http://wokkiri.example.com', 'https://evil.example', f'http://{local}'):
+                self.assertEqual(self.wrong(Host='wokkiri.example.com', Origin=origin), 403)
+            self.assertEqual(self.wrong(Origin=f'http://{local}'), 403)
+        self.assertEqual(self.wrong(Origin=f'http://{local}'), 400)
+
+    def test_limit_returns_429_until_window_passes(self):
+        with mock.patch.object(app, 'LIMITS', dict(signup=(2, 3600), enter=(3, 600))):
+            # 로그인·복구·키 재발급은 한 묶음으로 셉니다.
+            self.assertEqual(self.wrong(), 400)
+            self.assertEqual(self.request('POST', '/api/recover', dict(login='nobody', key='AAAA-AAAA-AAAA', pin='9999'))[0], 400)
+            self.assertEqual(self.request('POST', '/api/recovery-key', dict(pin='0000'))[0], 400)
+            status, cookie, err = self.login('garam', '1111')
+            self.assertEqual((status, cookie, err), (429, None, {'error': '요청이 너무 많아요. 잠시 뒤에 다시 시도해 주세요.'}))
+            self.assertEqual(self.request('POST', '/api/recover', dict(login='nobody', key='AAAA-AAAA-AAAA', pin='9999'))[0], 429)
+            self.assertEqual(self.request('POST', '/api/recovery-key', dict(pin='0000'))[0], 429)
+            # 가입은 따로 세고, 제한과 상관없는 요청은 그대로 됩니다.
+            signup = lambda login: self.request('POST', '/api/signup', dict(login=login, name='제한', pin='5555'))[0]
+            self.assertEqual([signup('limit_a'), signup('limit_b'), signup('limit_c')], [200, 200, 429])
+            self.assertEqual(self.request('GET', '/api/state')[0], 200)
+            self.assertEqual(self.request('POST', '/api/logout', {})[0], 200)
+            type(self).now += 599
+            self.assertEqual(self.wrong(), 429)
+            # 10분이 지나면 로그인 묶음만 풀리고, 가입은 1시간이 지나야 풀립니다.
+            type(self).now += 1
+            self.assertEqual(self.login('garam', '1111')[0], 200)
+            self.assertEqual(signup('limit_c'), 429)
+            type(self).now += 3000
+            self.assertEqual(signup('limit_c'), 200)
+
+    def test_forwarded_for_only_with_trusted_proxy(self):
+        with mock.patch.object(app, 'LIMITS', dict(signup=(1, 3600), enter=(1, 600))):
+            # 설정이 없으면 헤더를 무시하므로 값을 바꿔 보내도 같은 주소로 셉니다.
+            self.assertEqual(self.wrong(**{'X-Forwarded-For': '1.1.1.1'}), 400)
+            self.assertEqual(self.wrong(**{'X-Forwarded-For': '2.2.2.2'}), 429)
+            self.assertEqual(set(app.hits), {('enter', '127.0.0.1')})
+            app.hits.clear()
+            with mock.patch.object(app, 'TRUST_PROXY', True):
+                # 프록시가 붙인 가장 오른쪽 값만 봅니다. 왼쪽 값은 접속자가 지어낼 수 있습니다.
+                self.assertEqual(self.wrong(**{'X-Forwarded-For': '9.9.9.9, 1.1.1.1'}), 400)
+                self.assertEqual(self.wrong(**{'X-Forwarded-For': '8.8.8.8, 1.1.1.1'}), 429)
+                self.assertEqual(self.wrong(**{'X-Forwarded-For': '1.1.1.1, 2.2.2.2'}), 400)
+                self.assertEqual(self.wrong(), 400)
+                self.assertEqual(set(app.hits), {('enter', '1.1.1.1'), ('enter', '2.2.2.2'), ('enter', '127.0.0.1')})
+
+    def test_old_hits_are_dropped(self):
+        with mock.patch.object(app, 'LIMITS', dict(signup=(10, 3600), enter=(30, 600))):
+            for i in range(50):
+                self.assertFalse(app.limited('enter', f'10.0.0.{i}', 1000))
+                self.assertFalse(app.limited('signup', f'10.0.0.{i}', 1000))
+            self.assertEqual(len(app.hits), 100)
+            app.limited('enter', 'new', 1700)
+            self.assertEqual(len(app.hits), 51)
+            app.limited('enter', 'new', 4700)
+            self.assertEqual(set(app.hits), {('enter', 'new')})
 
 
 class MidnightChecks(Server):

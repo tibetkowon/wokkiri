@@ -1,0 +1,5 @@
+# wokkiri.example.com을 실제 주소로 바꿉니다. 인증서는 Caddy가 자동으로 받고 갱신합니다.
+# 포트는 /etc/wokkiri.env의 PORT와 같아야 합니다.
+wokkiri.example.com {
+	reverse_proxy 127.0.0.1:8000
+}

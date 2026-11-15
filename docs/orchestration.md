@@ -23,6 +23,10 @@ scripts/worker.py coder <지시서 파일>
 
 시작한 뒤 조율자는 턴을 끝내고, 작업이 끝나면 Orca가 이 채팅을 깨웁니다. 지시서는 저장소 밖 임시 폴더에 둡니다. 같은 작업 트리에서 coder를 동시에 둘 이상 돌리지 않으며, 병렬이 필요하면 `--worktree new-child --name <이름>`을 더합니다.
 
+## 세션 정리
+
+작업 세션은 `--keep-open` 없이 띄웁니다. 끝난 세션은 Orca가 스스로 닫고, 수정이 더 필요하면 `orchestration send`가 닫힌 세션을 다시 열어 이어서 일을 맡깁니다. 그래서 재작업을 위해 열어 둘 필요가 없습니다. 조율자는 사용자에게 최종 보고를 하기 전에 `orchestration worker-list --json`으로 `terminalState`가 `retained`인 세션이 남았는지 확인하고, 있으면 `worker-release --dispatch <id>`로 닫습니다. 인증 오류 등으로 멈춘 채 "진행 중"으로 남은 세션은 `release`가 거부되니 `worker-stop --dispatch <id>`로 정리합니다. 사용자가 직접 대화하려는 세션만 `--keep-open`으로 띄웁니다.
+
 ## 진행 순서
 
 1. 필요하면 reader로 현황을 읽습니다.

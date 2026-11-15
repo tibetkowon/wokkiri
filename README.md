@@ -56,6 +56,7 @@ Node는 JavaScript 문법 확인에만 사용하며 앱 실행에는 필요하�
 
 - [최종 기획](docs/product-spec.md)
 - [구현 선택·화면 흐름·시험 방법·운영 전 한계](docs/implementation.md)
+- [배포 순서(Google Cloud VM + Caddy)](docs/deploy.md)
 - [개발 인계](HANDOFF.md)
 
 로그인은 아이디와 PIN 4자리, 복구는 가입 때 받은 복구 키뿐이며 이메일·소셜 계정 연동은 없습니다. 외부 계정·유료 가입·공개 배포 없이 로컬 범위를 구현했습니다.

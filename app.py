@@ -1,4 +1,4 @@
-"""로컬 전용 서버: python3 app.py  (가상 시험 회원이 필요하면 WOKKIRI_DEMO=1 python3 app.py)"""
+"""서버: python3 app.py  (가상 시험 회원이 필요하면 WOKKIRI_DEMO=1 python3 app.py, 배포는 docs/deploy.md)"""
 import json
 import os
 import sqlite3
@@ -15,6 +15,17 @@ ROOT = Path(__file__).parent
 DB = Path(os.environ.get('WOKKIRI_DB', str(ROOT / 'data' / 'wokkiri.sqlite3')))
 # 가상 회원(PIN 1111~4444, 복구 키 DEMO-DEMO-DEMO)과 예시 리그를 만듭니다. 누구나 아는 값이라 배포 서버에서는 켜지 않습니다.
 DEMO = os.environ.get('WOKKIRI_DEMO') == '1'
+# 아래 셋은 HTTPS 프록시(Caddy) 뒤에서만 켭니다. 기본값은 로컬 http 개발용입니다.
+SECURE = os.environ.get('WOKKIRI_SECURE_COOKIE') == '1'
+# 켜면 접속 주소를 X-Forwarded-For에서 읽습니다. 프록시 없이 켜면 헤더를 위조해 제한을 피할 수 있습니다.
+TRUST_PROXY = os.environ.get('WOKKIRI_TRUST_PROXY') == '1'
+# 공개 주소(예: wokkiri.example.com). 정하면 이 Host와 https 출처만 받고, 없으면 로컬 주소만 받습니다.
+HOST = os.environ.get('WOKKIRI_HOST')
+# 접속 주소별 제한: 묶음 이름 -> (횟수, 초). 테스트는 이 값을 바꿔 씁니다.
+LIMITS = dict(signup=(10, 3600), enter=(30, 600))
+LIMITED = {'/api/signup': 'signup', '/api/login': 'enter', '/api/recover': 'enter', '/api/recovery-key': 'enter'}
+# shortcut: 요청 시각을 메모리에만 두어 재시작하면 초기화됩니다. 서버 프로세스를 둘 이상으로 늘리면 공유 저장소로 옮깁니다.
+hits, swept = {}, [0.0]
 FILES = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/logo.png': ('logo.png', 'image/png'), '/qrcode.js': ('qrcode.js', 'text/javascript; charset=utf-8'), '/holidays.json': ('holidays.json', 'application/json')}
 
 
@@ -70,7 +81,23 @@ def prepare():
 
 
 def session_cookie(token, age=auth.SESSION_SECONDS):
-    return f'wokkiri={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={age}'
+    return f'wokkiri={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={age}' + ('; Secure' if SECURE else '')
+
+
+def limited(name, address, now):
+    """접속 주소가 이 묶음의 한도를 넘었으면 True입니다. 거부한 요청은 세지 않습니다."""
+    count, seconds = LIMITS[name]
+    if not 0 <= now - swept[0] < 60:
+        # 창이 지난 주소를 1분마다 지워 메모리가 계속 커지지 않게 합니다. 시계가 뒤로 가면 전부 지웁니다.
+        for key in [k for k, times in hits.items() if not 0 <= now - times[-1] < LIMITS[k[0]][1]]:
+            del hits[key]
+        swept[0] = now
+    times = [t for t in hits.get((name, address), []) if 0 <= now - t < seconds]
+    if len(times) >= count:
+        hits[name, address] = times
+        return True
+    hits[name, address] = times + [now]
+    return False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -92,7 +119,17 @@ class Handler(BaseHTTPRequestHandler):
         return cookie.value if cookie else None
 
     def allowed(self):
+        if HOST:
+            return self.headers.get('Host') == HOST
         return self.headers.get('Host') in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
+
+    def origin(self):
+        return f'https://{HOST}' if HOST else f'http://{self.headers.get("Host")}'
+
+    def address(self):
+        """접속 주소입니다. 프록시가 붙인 값은 X-Forwarded-For의 가장 오른쪽이고, 그 왼쪽은 접속자가 지어낼 수 있습니다."""
+        forwarded = ','.join(self.headers.get_all('X-Forwarded-For') or []).split(',')[-1].strip() if TRUST_PROXY else ''
+        return forwarded or self.client_address[0]
 
     def do_GET(self):
         if not self.allowed():
@@ -119,7 +156,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, (ROOT / 'web' / name).read_bytes(), mime, cache='public, max-age=86400' if name == 'logo.png' else 'no-store')
 
     def do_POST(self):
-        if not self.allowed() or self.headers.get('Origin', f'http://{self.headers.get("Host")}') != f'http://{self.headers.get("Host")}' or self.headers.get('Content-Type') != 'application/json':
+        if not self.allowed() or self.headers.get('Origin', self.origin()) != self.origin() or self.headers.get('Content-Type') != 'application/json':
             return self.send(403, {'error': '허용되지 않은 요청입니다.'})
         try:
             size = int(self.headers.get('Content-Length', 0))
@@ -129,6 +166,9 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError('요청 형식을 확인해 주세요.')
             token, path = self.token(), self.path
+            # 본문을 다 읽은 뒤에 거부합니다. 읽지 않고 끊으면 프록시가 응답을 못 받을 수 있습니다.
+            if path in LIMITED and limited(LIMITED[path], self.address(), time.time()):
+                return self.send(429, {'error': '요청이 너무 많아요. 잠시 뒤에 다시 시도해 주세요.'})
             if path in ('/api/signup', '/api/login', '/api/recover'):
                 def enter(state, now):
                     key = None
@@ -166,8 +206,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '8000'))
     prepare()
-    server = HTTPServer(('127.0.0.1', port), Handler)
-    print(f'와끼리 로컬 MVP: http://127.0.0.1:{port}', flush=True)
+    bind = os.environ.get('WOKKIRI_BIND', '127.0.0.1')
+    server = HTTPServer((bind, port), Handler)
+    print(f'와끼리: http://{bind}:{port}', flush=True)
     if DEMO:
         # 아이디·PIN·복구 키 값은 로그에 남기지 않습니다. README에 있습니다.
         print('시험 모드(WOKKIRI_DEMO=1): 가상 회원과 예시 리그가 있습니다. 로그인 정보는 README를 보세요.', flush=True)

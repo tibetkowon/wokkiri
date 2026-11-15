@@ -1,0 +1,23 @@
+# /etc/systemd/system/wokkiri.service 로 복사합니다. 코드는 /opt/wokkiri, 데이터는 /opt/wokkiri/data 기준입니다.
+[Unit]
+Description=Wokkiri server
+After=network.target
+
+[Service]
+User=wokkiri
+Group=wokkiri
+WorkingDirectory=/opt/wokkiri
+EnvironmentFile=/etc/wokkiri.env
+ExecStart=/usr/bin/python3 /opt/wokkiri/app.py
+Restart=on-failure
+RestartSec=3
+
+# 쓸 수 있는 곳은 데이터 폴더뿐입니다(시작 전에 폴더가 있어야 합니다).
+ProtectSystem=strict
+ReadWritePaths=/opt/wokkiri/data
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
