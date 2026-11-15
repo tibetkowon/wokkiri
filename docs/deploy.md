@@ -2,7 +2,7 @@
 
 VM 한 대에 Python 서버, SQLite 파일, Caddy(HTTPS 자동)를 올리는 순서입니다.
 
-**확인한 범위(2026-11-15, Debian 12, Python 3.11.2, Caddy 2.6.2):** 5절의 스왑·"처음 설치", 6절 Caddy(인증서 발급), 7절의 cron 등록·수동 백업·내 컴퓨터로 가져오기는 실제 VM에서 실행해 확인했습니다. **확인되지 않음:** 1~3절의 콘솔 메뉴(VM·방화벽·고정 IP·예산은 `gcloud` 명령으로 만들었습니다), 5절 "코드 갱신", 7절의 되돌리기 명령, cron이 정해진 시각에 실제로 도는지, 인증서 자동 갱신입니다.
+**확인한 범위(2026-11-15, Debian 12, Python 3.11.2, Caddy 2.6.2):** 5절의 스왑·"처음 설치", 6절 Caddy(인증서 발급), 7절의 cron 등록·수동 백업·내 컴퓨터로 가져오기는 실제 VM에서 실행해 확인했습니다. 매일 18:30(UTC)의 cron 자동 실행은 2026-11-15 18:30(UTC)에 돌아 버킷에 파일이 생긴 것을 2026-11-16에 확인했습니다. **확인되지 않음:** 1~3절의 콘솔 메뉴(VM·방화벽·고정 IP·예산은 `gcloud` 명령으로 만들었습니다), 5절 "코드 갱신", 7절의 되돌리기 명령, 인증서 자동 갱신입니다. 7절의 오프사이트 백업(버킷·권한·범위·cron)과 "버킷 사본으로 복원"은 같은 날 실제로 실행해 확인했습니다.
 
 아래에서 `wokkiri.example.com`은 실제 주소로, `VM이름`·`영역`은 만든 값으로 바꿉니다. `gcloud`의 기본 프로젝트가 다른 프로젝트면 `gcloud compute` 명령마다 `--project 프로젝트ID`를 붙입니다. 기준은 Debian 12 이미지, 코드 `/opt/wokkiri`, 데이터 `/opt/wokkiri/data`입니다.
 
@@ -85,6 +85,8 @@ curl -s -H 'Host: wokkiri.example.com' http://127.0.0.1:8000/api/state   # {"act
 | `WOKKIRI_BIND` | 바인딩 주소(기본 `127.0.0.1`). Caddy와 같은 VM이면 바꾸지 않습니다. |
 | `WOKKIRI_DB` | DB 경로(기본 `data/wokkiri.sqlite3`). 바꾸면 systemd의 `ReadWritePaths`와 백업 명령도 같이 바꿉니다. |
 
+백업 스크립트만 읽는 `WOKKIRI_BACKUP_BUCKET`은 이 파일이 아니라 cron 파일에 둡니다(7절).
+
 ### 코드 갱신
 
 내 컴퓨터에서 위와 같이 압축을 만들어 올린 뒤, VM 안에서 아래만 실행합니다. 압축에 `data/`가 없으므로 DB와 백업은 내용도 소유권도 그대로입니다. **갱신할 때 `/opt/wokkiri`에 `chown -R`을 하지 마세요.** `data/` 아래의 DB와 백업까지 root 소유가 되어 서버가 DB에 쓰지 못합니다.
@@ -121,7 +123,97 @@ sudo -u wokkiri /usr/bin/python3 /opt/wokkiri/scripts/backup.py    # 한 번 직
 sudo ls -l /opt/wokkiri/data/backups
 ```
 
-백업이 VM 안에만 있으면 디스크나 VM을 잃을 때 같이 사라집니다. 주 1회 정도 내 컴퓨터로 가져옵니다(내 컴퓨터에서 실행).
+### 오프사이트 백업 (Cloud Storage)
+
+백업이 VM 안에만 있으면 디스크나 VM을 잃을 때 같이 사라집니다. 환경변수 `WOKKIRI_BACKUP_BUCKET`이 있으면 `scripts/backup.py`가 방금 만든 파일을 `gcloud storage cp`로 `gs://<버킷>/`에도 올립니다(Debian 12 GCE 이미지에는 `gcloud`가 들어 있습니다). 올리기가 실패해도 로컬 백업과 보관 개수 정리는 그대로이고, 종료 코드 1과 함께 "버킷 올리기 실패(종료 코드 N)…" 한 줄이 stderr에 남습니다. `gcloud`의 출력은 인증 정보가 섞일 수 있어 내보내지 않으므로, 자세한 원인은 VM에서 `gcloud storage cp`를 직접 실행해 봅니다.
+
+버킷은 한 번만 만듭니다(내 컴퓨터에서 실행). `<서비스 계정>`은 `gcloud compute instances describe VM이름 --zone 영역 --format='value(serviceAccounts[0].email)'`로 봅니다.
+
+```sh
+gcloud storage buckets create gs://<버킷> --project <프로젝트 ID> --location us-central1 --default-storage-class STANDARD --uniform-bucket-level-access --public-access-prevention
+echo '{"rule":[{"action":{"type":"Delete"},"condition":{"age":30}}]}' > /tmp/lifecycle.json
+gcloud storage buckets update gs://<버킷> --lifecycle-file /tmp/lifecycle.json      # 만든 지 30일 지난 사본은 지워집니다
+# VM은 새 객체를 만들 수만 있습니다(삭제·덮어쓰기·목록·읽기 불가). 받는 것은 프로젝트 소유자 계정으로 합니다.
+gcloud storage buckets add-iam-policy-binding gs://<버킷> --member serviceAccount:<서비스 계정> --role roles/storage.objectCreator
+# 기본 서비스 계정은 프로젝트 편집자라서, 버킷에 자동으로 붙는 편집자·뷰어 권한을 빼야 위 제한이 실제로 걸립니다. 소유자 권한은 남깁니다.
+gcloud storage buckets remove-iam-policy-binding gs://<버킷> --member projectEditor:<프로젝트 ID> --role roles/storage.legacyBucketOwner
+gcloud storage buckets remove-iam-policy-binding gs://<버킷> --member projectEditor:<프로젝트 ID> --role roles/storage.legacyObjectOwner
+gcloud storage buckets remove-iam-policy-binding gs://<버킷> --member projectViewer:<프로젝트 ID> --role roles/storage.legacyBucketReader
+gcloud storage buckets remove-iam-policy-binding gs://<버킷> --member projectViewer:<프로젝트 ID> --role roles/storage.legacyObjectReader
+```
+
+VM의 접근 범위에 스토리지 쓰기를 더합니다. 범위는 VM이 꺼져 있을 때만 바꿀 수 있어 잠깐 끊깁니다. `--scopes`는 통째로 바뀌므로 있던 범위도 같이 적습니다.
+
+```sh
+gcloud compute instances stop VM이름 --zone 영역
+gcloud compute instances set-service-account VM이름 --zone 영역 --service-account <서비스 계정> --scopes logging-write,monitoring-write,storage-rw
+gcloud compute instances start VM이름 --zone 영역
+```
+
+cron은 `/etc/wokkiri.env`를 읽지 않으므로(서비스 전용, root만 읽음) 버킷 이름은 cron 파일 첫 줄에 둡니다. VM에 메일 프로그램이 없어 cron이 출력을 버리므로 `logger`로 시스템 로그에 남깁니다. VM 안에서 실행합니다.
+
+```sh
+printf 'WOKKIRI_BACKUP_BUCKET=<버킷>\n30 18 * * * wokkiri /usr/bin/python3 /opt/wokkiri/scripts/backup.py 2>&1 | /usr/bin/logger -t wokkiri-backup\n' | sudo tee /etc/cron.d/wokkiri-backup
+sudo -u wokkiri env WOKKIRI_BACKUP_BUCKET=<버킷> /usr/bin/python3 /opt/wokkiri/scripts/backup.py   # 직접 돌릴 때는 변수를 같이 줍니다
+sudo journalctl -t wokkiri-backup -n 20     # cron이 돌린 결과: 파일 경로만 있으면 성공, "실패"가 있으면 종료 코드가 같이 남습니다
+```
+
+내 컴퓨터에서 `gcloud storage ls -l gs://<버킷>/`에 방금 파일이 보이면 된 것입니다. 지운 객체는 버킷 기본값(소프트 삭제)으로 7일 동안 되살릴 수 있습니다.
+
+### 버킷 사본으로 복원
+
+내 컴퓨터에서 사본을 받아 열리는지 본 뒤 VM으로 보냅니다.
+
+```sh
+gcloud storage ls -l gs://<버킷>/
+(umask 077 && gcloud storage cp gs://<버킷>/wokkiri-날짜-시각.db .)
+sqlite3 wokkiri-날짜-시각.db 'PRAGMA integrity_check'      # ok가 나와야 합니다
+gcloud compute scp wokkiri-날짜-시각.db VM이름:/tmp/ --zone 영역
+```
+
+VM 안에서 서버를 멈추고, **지금 DB를 지우지 않고 따로 옮겨 둔 뒤** 사본으로 바꿉니다. 복원하면 사본 시각 이후의 기록은 새 DB에 없으므로, 옮겨 둔 원본이 그 기록과 되돌릴 길의 전부입니다. VM에는 `sqlite3` 명령이 없어 검사는 `python3`로 합니다.
+
+```sh
+F=/tmp/wokkiri-날짜-시각.db
+sudo systemctl stop wokkiri
+systemctl is-active wokkiri             # inactive가 나와야 합니다. active면 여기서 멈춥니다
+# 받은 사본을 VM에서 한 번 더 검사합니다. ok가 아니면 여기서 멈추고 서비스를 다시 켭니다(아직 아무것도 바꾸지 않았습니다)
+python3 -c "import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute('PRAGMA integrity_check').fetchone()[0])" $F
+
+# 지금 DB와 남아 있는 -wal, -shm 파일을 소유자만 볼 수 있는 폴더(0700, 파일 0600)로 함께 옮깁니다
+KEEP=/opt/wokkiri/data/before-restore-$(date +%Y%m%d-%H%M%S)
+sudo install -d -o wokkiri -g wokkiri -m 700 "$KEEP"
+sudo sh -c "mv /opt/wokkiri/data/wokkiri.sqlite3* \"$KEEP\"/ && chmod 600 \"$KEEP\"/*"
+sudo ls -l "$KEEP" /opt/wokkiri/data    # 원본이 KEEP에 있고 data에는 wokkiri.sqlite3로 시작하는 파일이 없어야 합니다
+
+sudo install -o wokkiri -g wokkiri -m 600 $F /opt/wokkiri/data/wokkiri.sqlite3
+sudo systemctl start wokkiri
+systemctl is-active wokkiri             # active
+curl -s -H 'Host: wokkiri.example.com' http://127.0.0.1:8000/api/state   # 켠 직후에는 빈 응답일 수 있어 몇 초 뒤에 봅니다. {"actor": null, ...}이 나오면 정상입니다
+echo "$KEEP"                            # 나중에 지우거나 되돌릴 때 쓸 경로이니 적어 둡니다
+```
+
+서비스가 뜨지 않거나 내용이 기대와 다르면 옮겨 둔 원본으로 되돌립니다.
+
+```sh
+sudo systemctl stop wokkiri
+sudo sh -c "rm -f /opt/wokkiri/data/wokkiri.sqlite3* && mv \"$KEEP\"/wokkiri.sqlite3* /opt/wokkiri/data/"
+sudo systemctl start wokkiri
+systemctl is-active wokkiri
+```
+
+브라우저로 로그인과 기록이 정상인지 확인한 뒤에만 정리합니다. 옮겨 둔 원본에도 회원 기록과 PIN 해시가 있으므로 필요 없다고 판단되면 지웁니다. 지우는 시점은 직접 정합니다(급하지 않으면 며칠 두어도 됩니다. `backup.py`의 보관 개수 정리는 이 폴더를 건드리지 않습니다).
+
+```sh
+rm /tmp/wokkiri-날짜-시각.db
+sudo rm -r "$KEEP"                      # 되돌린 뒤라 폴더가 비어 있으면 sudo rmdir "$KEEP"
+```
+
+VM 자체를 잃었으면 5~6절대로 새 VM에 설치한 뒤 같은 순서로 바꿉니다. 내 컴퓨터의 사본도 다 쓴 뒤 지웁니다.
+
+### VM의 백업을 내 컴퓨터로 가져오기
+
+버킷을 쓰지 않을 때는 주 1회 정도 내 컴퓨터로 가져옵니다(내 컴퓨터에서 실행).
 
 ```sh
 # umask 077: 받는 파일을 나만 읽게(0600) 만듭니다. 괄호 안에서만 적용됩니다.
@@ -153,7 +245,8 @@ sudo systemctl start wokkiri
 - [x] `garam` / `1111`로 로그인되지 않습니다(시험 모드가 꺼져 있음).
 - [x] 밖에서 `http://VM의IP:8000`은 열리지 않습니다.
 - [x] VM을 다시 시작한 뒤에도 서비스·Caddy·스왑이 뜨고 DB와 백업 파일이 남아 있습니다.
-- [ ] 백업 파일이 매일 생기고, 내 컴퓨터로 가져온 사본이 열립니다. (수동 백업과 가져오기는 확인, cron의 자동 실행은 다음 날 `sudo ls -l /opt/wokkiri/data/backups`로 확인 필요)
+- [x] 백업 파일이 매일 생기고, 내 컴퓨터로 가져온 사본이 열립니다. (수동 백업과 가져오기는 2026-11-15, cron의 자동 실행은 2026-11-16에 버킷 업로드까지 확인)
+- [x] 버킷에 사본이 올라가고(`gcloud storage ls -l gs://<버킷>/`), 받은 사본이 `PRAGMA integrity_check`에서 `ok`이며, VM에서는 버킷 객체를 지우거나 읽지 못합니다.
 
 ## 알아 둘 한계
 

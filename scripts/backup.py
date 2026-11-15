@@ -3,12 +3,15 @@
 
 sqlite3 backup API로 복사하므로 서버가 실행 중이어도 안전합니다. <백업폴더>/wokkiri-YYYYmmdd-HHMMSS.db(소유자만 읽기)로 만들고
 보관 개수를 넘으면 오래된 것부터 지웁니다. 복사나 검사가 실패하면 만들던 파일을 지우고 0이 아닌 코드로 끝납니다.
+환경변수 WOKKIRI_BACKUP_BUCKET이 있으면 방금 만든 파일을 gs://<버킷>/ 에도 올립니다. 올리기가 실패해도 로컬 백업은 남고 0이 아닌 코드로 끝나며, gcloud의 출력은 내보내지 않습니다.
 """
 import argparse
 import os
 import re
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import time
 from contextlib import closing
 from pathlib import Path
@@ -17,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import DB  # 서버가 쓰는 경로와 같게(WOKKIRI_DB 포함)
 
 NAME = re.compile(r'wokkiri-\d{8}-\d{6}\.db')
+BUCKET = re.compile(r'[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]')
 
 
 def backup(db, folder, keep=14, now=None):
@@ -44,6 +48,16 @@ def backup(db, folder, keep=14, now=None):
     return target
 
 
+def upload(path, bucket):
+    path = Path(os.path.abspath(path))  # 항상 '/'로 시작해 gcloud가 경로를 옵션으로 읽지 못합니다.
+    if not BUCKET.fullmatch(bucket) or not NAME.fullmatch(path.name):
+        raise ValueError('버킷 이름이나 백업 파일 이름이 올바르지 않습니다.')
+    # 서버 계정은 홈 폴더에 쓸 수 없어 gcloud 설정 폴더를 임시 폴더로 둡니다. 인증은 VM의 서비스 계정을 씁니다.
+    # gcloud 출력에는 인증 정보가 섞일 수 있어 받지 않고 버립니다.
+    with tempfile.TemporaryDirectory() as config:
+        subprocess.run(['gcloud', 'storage', 'cp', str(path), f'gs://{bucket}/'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300, env={**os.environ, 'CLOUDSDK_CONFIG': config})
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='와끼리 DB 백업')
     parser.add_argument('--db', default=str(DB), help='DB 경로(기본: 서버가 쓰는 경로)')
@@ -51,6 +65,15 @@ if __name__ == '__main__':
     parser.add_argument('--keep', type=int, default=14, help='보관 개수(기본 14)')
     args = parser.parse_args()
     try:
-        print(backup(args.db, args.dir or Path(args.db).parent / 'backups', args.keep))
+        made = backup(args.db, args.dir or Path(args.db).parent / 'backups', args.keep)
     except (OSError, ValueError, sqlite3.Error) as err:
         sys.exit(f'백업 실패: {err}')
+    print(made)
+    bucket = os.environ.get('WOKKIRI_BACKUP_BUCKET')
+    if bucket:
+        try:
+            upload(made, bucket)
+        except (OSError, ValueError, subprocess.SubprocessError) as err:
+            # 예외 문구에는 명령과 출력이 담길 수 있어 종료 코드나 예외 종류만 남깁니다.
+            reason = f'종료 코드 {err.returncode}' if isinstance(err, subprocess.CalledProcessError) else type(err).__name__
+            sys.exit(f'버킷 올리기 실패({reason}). 로컬 백업은 남아 있습니다. VM에서 gcloud storage cp를 직접 실행해 원인을 확인하세요.')
