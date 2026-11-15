@@ -2,9 +2,9 @@
 
 VM 한 대에 Python 서버, SQLite 파일, Caddy(HTTPS 자동)를 올리는 순서입니다.
 
-**이 문서의 명령과 콘솔 메뉴는 모두 실제로 실행해 보지 않았습니다(확인되지 않음).** 저장소 안에서 확인한 것은 서버 코드와 `scripts/backup.py`의 자동 테스트뿐입니다. `deploy/`의 Caddyfile과 systemd 단위도 실제 Caddy·systemd로 읽혀 보지 않았습니다. 처음 따라 할 때는 한 줄씩 결과를 보며 진행해 주세요.
+**확인한 범위(2026-11-15, Debian 12, Python 3.11.2, Caddy 2.6.2):** 5절의 스왑·"처음 설치", 6절 Caddy(인증서 발급), 7절의 cron 등록·수동 백업·내 컴퓨터로 가져오기는 실제 VM에서 실행해 확인했습니다. **확인되지 않음:** 1~3절의 콘솔 메뉴(VM·방화벽·고정 IP·예산은 `gcloud` 명령으로 만들었습니다), 5절 "코드 갱신", 7절의 되돌리기 명령, cron이 정해진 시각에 실제로 도는지, 인증서 자동 갱신입니다.
 
-아래에서 `wokkiri.example.com`은 실제 주소로, `VM이름`·`영역`은 만든 값으로 바꿉니다. 기준은 Debian 12 이미지, 코드 `/opt/wokkiri`, 데이터 `/opt/wokkiri/data`입니다.
+아래에서 `wokkiri.example.com`은 실제 주소로, `VM이름`·`영역`은 만든 값으로 바꿉니다. `gcloud`의 기본 프로젝트가 다른 프로젝트면 `gcloud compute` 명령마다 `--project 프로젝트ID`를 붙입니다. 기준은 Debian 12 이미지, 코드 `/opt/wokkiri`, 데이터 `/opt/wokkiri/data`입니다.
 
 ## 1. 결제 계정과 예산 알림
 
@@ -24,8 +24,9 @@ VM 한 대에 Python 서버, SQLite 파일, Caddy(HTTPS 자동)를 올리는 순
 
 ## 4. 주소 연결
 
-둘 중 하나를 고릅니다. 어느 쪽이든 주소가 VM의 외부 IP를 가리키게 합니다.
+셋 중 하나를 고릅니다. 어느 쪽이든 주소가 VM의 외부 IP를 가리키게 합니다.
 
+- 가입 없이 쓰는 와일드카드 DNS `sslip.io`: IP의 점을 하이픈으로 바꾼 `1-2-3-4.sslip.io`가 `1.2.3.4`로 풀립니다. 이 이름으로 인증서 발급까지 확인했습니다. 주소가 IP에 묶여 있어 고정 IP를 바꾸면 주소도 바뀝니다.
 - 무료 DDNS 서브도메인(예: DuckDNS)에서 이름을 만들고 IP를 넣습니다.
 - 구매한 도메인이면 DNS에 A 레코드를 추가합니다.
 
@@ -41,6 +42,18 @@ gcloud compute scp /tmp/wokkiri.tar.gz VM이름:/tmp/ --zone 영역
 gcloud compute ssh VM이름 --zone 영역
 ```
 
+### 스왑과 패키지 갱신
+
+e2-micro는 메모리가 1GB 미만이고 스왑이 없습니다. VM 안에서 한 번만 실행합니다. `mkswap`·`swapon`은 `/sbin`에 있어 일반 사용자 PATH에는 없습니다.
+
+```sh
+sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile
+sudo /sbin/mkswap /swapfile && sudo /sbin/swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab    # 재부팅 뒤에도 켜지게 합니다
+sudo apt update && sudo apt -y upgrade
+/sbin/swapon --show
+```
+
 ### 처음 설치
 
 VM 안에서 한 번만 실행합니다. 코드는 root 소유(서버가 고칠 수 없음), `data/`만 `wokkiri` 소유입니다. `--no-same-owner`로 풀면 풀린 파일이 root 소유가 되므로 `chown -R`은 쓰지 않습니다.
@@ -53,7 +66,7 @@ sudo tar --no-same-owner -xzf /tmp/wokkiri.tar.gz -C /opt/wokkiri
 sudo install -d -o wokkiri -g wokkiri -m 700 /opt/wokkiri/data
 
 sudo install -m 640 /opt/wokkiri/deploy/wokkiri.env.example /etc/wokkiri.env
-sudo nano /etc/wokkiri.env             # WOKKIRI_HOST를 실제 주소로 바꿉니다
+sudo nano /etc/wokkiri.env             # WOKKIRI_HOST를 실제 주소로 바꿉니다(또는 sudo sed -i 's/wokkiri\.example\.com/실제주소/' /etc/wokkiri.env)
 sudo cp /opt/wokkiri/deploy/wokkiri.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now wokkiri
@@ -91,9 +104,12 @@ sudo ls -ln /opt/wokkiri/data           # DB와 backups의 소유자가 그대�
 sudo apt update && sudo apt install -y caddy
 sudo cp /opt/wokkiri/deploy/Caddyfile /etc/caddy/Caddyfile
 sudo nano /etc/caddy/Caddyfile         # 주소를 실제 값으로 바꿉니다
+sudo caddy validate --config /etc/caddy/Caddyfile   # "Valid configuration"이 나와야 합니다
 sudo systemctl reload caddy
-journalctl -u caddy -n 30              # 인증서 발급 오류가 없는지 봅니다
+sudo journalctl -u caddy -n 30         # "certificate obtained successfully"가 보이면 발급된 것입니다
 ```
+
+Debian 12의 `apt`로 깔리는 Caddy는 2.6.2이고 설치하면 바로 켜져 재부팅 뒤에도 뜹니다. 발급은 reload 뒤 몇 초면 끝났습니다. 로그의 `no OCSP server specified in certificate` 경고는 무시해도 됩니다.
 
 ## 7. 백업
 
@@ -129,13 +145,15 @@ sudo systemctl start wokkiri
 
 ## 8. 확인 항목
 
-- [ ] `https://wokkiri.example.com`이 인증서 경고 없이 열리고, `http://`로 들어가면 `https://`로 넘어갑니다.
-- [ ] 가입 → 복구 키 화면 → 로그아웃 → 로그인이 됩니다.
-- [ ] 브라우저 개발자 도구의 쿠키 목록에서 `wokkiri` 쿠키에 Secure·HttpOnly·SameSite=Strict가 보입니다.
-- [ ] `garam` / `1111`로 로그인되지 않습니다(시험 모드가 꺼져 있음).
-- [ ] 밖에서 `http://VM의IP:8000`은 열리지 않습니다.
-- [ ] VM을 다시 시작한 뒤에도 서비스가 뜨고 기록이 남아 있습니다.
-- [ ] 백업 파일이 매일 생기고, 내 컴퓨터로 가져온 사본이 열립니다.
+`[x]`는 2026-11-15 설치 때 `curl`과 VM 안 명령으로 확인한 항목입니다. 다시 설치하면 전부 다시 봅니다.
+
+- [x] `https://wokkiri.example.com`이 인증서 경고 없이 열리고, `http://`로 들어가면 `https://`로 넘어갑니다(308).
+- [ ] 가입 → 복구 키 화면 → 로그아웃 → 로그인이 됩니다. (가입 API 응답 200까지만 확인했고 브라우저 흐름은 확인되지 않음)
+- [x] `wokkiri` 쿠키에 Secure·HttpOnly·SameSite=Strict가 있습니다(가입 응답의 `Set-Cookie`로 확인).
+- [x] `garam` / `1111`로 로그인되지 않습니다(시험 모드가 꺼져 있음).
+- [x] 밖에서 `http://VM의IP:8000`은 열리지 않습니다.
+- [x] VM을 다시 시작한 뒤에도 서비스·Caddy·스왑이 뜨고 DB와 백업 파일이 남아 있습니다.
+- [ ] 백업 파일이 매일 생기고, 내 컴퓨터로 가져온 사본이 열립니다. (수동 백업과 가져오기는 확인, cron의 자동 실행은 다음 날 `sudo ls -l /opt/wokkiri/data/backups`로 확인 필요)
 
 ## 알아 둘 한계
 
