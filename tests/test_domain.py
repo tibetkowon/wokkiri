@@ -39,6 +39,66 @@ class Rules(unittest.TestCase):
         self.r['records']={'ga':dict(division='rx',type='time',finished=False,value=0),'na':dict(division='scaled',type='time',finished=True,value=1)}
         self.assertEqual(round_scores(self.l,self.r)['order'][0],'ga')
 
+    def test_zero_is_a_valid_record(self):
+        only={'division':'attendance'}
+        zeros=[reps(0),dict(division='rx',type='amrap',rounds=0,extra=0),dict(division='rx',type='time',finished=False,value=0)]
+        some=[reps(1),dict(division='rx',type='amrap',rounds=0,extra=1),dict(division='rx',type='time',finished=False,value=1)]
+        for zero,one in zip(zeros,some):
+            self.assertEqual(record(zero,'daily'),zero)
+            # 0회는 같은 유형 기록 다음이고 출석만·미출석보다 앞이며, 0회끼리는 공동순위입니다. 유형이 같으면 불일치가 아닙니다.
+            self.r['records']={'ga':one,'na':zero,'da':copy.deepcopy(zero),'ra':only}
+            s=round_scores(self.l,self.r)
+            self.assertEqual((s['mismatch'],s['points']),(False,dict(ga=1,na=2,da=2,ra=4)))
+            self.r['records']={'ga':zero,'na':only}
+            self.assertEqual(round_scores(self.l,self.r)['points'],dict(ga=1,na=2,da=4,ra=4))
+        # 유형이 다른 0회는 다른 기록과 마찬가지로 불일치입니다.
+        self.r['records']={'ga':zeros[0],'na':zeros[1]}
+        self.assertTrue(round_scores(self.l,self.r)['mismatch'])
+        # 0회 결정은 중량형을 바꾸지 않습니다. 성공한 중량이 없으면 기록이 아니라 출석만입니다.
+        for v in (0,-1):
+            with self.assertRaises(ValueError):
+                record(dict(division='rx',type='weight',value=v),'daily')
+        # 지정 WOD에서도 0회는 기록이라 참여로 인정합니다.
+        self.assertEqual(record(reps(0),'designated'),reps(0))
+
+    def test_pending_until_close(self):
+        close=self.r['close']
+        self.r['records']={'ga':reps(10),'na':{'division':'attendance'}}
+        self.l['rounds']=[self.r]
+        # 마감 직전: 기록·출석 회원은 잠정 등수, 미출석은 None("집계 전")이고 누적에는 넣지 않습니다.
+        v=view(self.l,close-1)
+        self.assertEqual(v['rounds'][0]['score']['points'],dict(ga=1,na=2,da=None,ra=None))
+        self.assertEqual((v['rounds'][0]['counted'],v['provisional']),(False,True))
+        self.assertTrue(all(x['points']==0 and x['rank']==1 for x in v['standings']))
+        # 마감 시각부터 미출석 N점을 매기고 누적에 반영합니다.
+        v=view(self.l,close)
+        self.assertEqual(v['rounds'][0]['score']['points'],dict(ga=1,na=2,da=4,ra=4))
+        self.assertTrue(v['rounds'][0]['counted'])
+        self.assertEqual({x['user']:(x['points'],x['rank']) for x in v['standings']},dict(ga=(1,1),na=(2,2),da=(4,3),ra=(4,3)))
+        # 불일치가 우선합니다. 마감 전에도 회차 전체가 보류(None)이고 마감 뒤에도 누적에 넣지 않습니다.
+        self.r['records']['da']=dict(division='rx',type='amrap',rounds=1,extra=0)
+        for now in (close-1,close):
+            v=view(self.l,now)
+            self.assertEqual((v['rounds'][0]['score']['mismatch'],v['rounds'][0]['counted'],set(v['rounds'][0]['score']['points'].values())),(True,False,{None}))
+        # view는 저장된 리그를 바꾸지 않습니다.
+        self.assertNotIn('score',self.r)
+
+    def test_pending_until_designated_round_ends(self):
+        lid=apply(self.state,'ga',dict(action='create',name='지정 리그',kind='designated',start='2026-12-01',count=2,duration=7),NOW)
+        l=self.state['leagues'][-1]
+        apply(self.state,'na',dict(action='join',invite=l['invite']),NOW)
+        apply(self.state,'ga',dict(action='record',league=lid,round='0',version=0,record=reps(0)),stamp('2026-12-01'))
+        # 1라운드는 종료일(12/7) 다음 날 00:00에 마감합니다. 그 전에는 미참여가 집계 전입니다.
+        end=stamp('2026-12-08')
+        v=view(l,end-1)
+        self.assertEqual((v['rounds'][0]['score']['points'],v['rounds'][0]['counted']),(dict(ga=1,na=None),False))
+        self.assertEqual([x['points'] for x in v['standings']],[0,0])
+        v=view(l,end)
+        self.assertEqual((v['rounds'][0]['score']['points'],v['rounds'][0]['counted']),(dict(ga=1,na=2),True))
+        # 2라운드는 이제 막 시작해 아직 집계 전이라 누적은 1라운드뿐입니다.
+        self.assertEqual((v['rounds'][1]['score']['points'],v['rounds'][1]['counted']),(dict(ga=None,na=None),False))
+        self.assertEqual({x['user']:x['points'] for x in v['standings']},dict(ga=1,na=2))
+
     def test_mismatch_removes_every_point_and_restores(self):
         self.l['rounds']=[self.r]
         before=view(self.l,NOW)['standings']

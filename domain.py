@@ -116,9 +116,12 @@ def view(league, now):
     pending = False
     for rnd in result['rounds']:
         rnd['score'] = round_scores(league, rnd)
-        active = now >= rnd['start']
-        rnd['counted'] = active and not rnd['score']['mismatch']
-        pending |= active and (rnd['score']['mismatch'] or now < rnd['close'])
+        active, closed = now >= rnd['start'], now >= rnd['close']
+        # 마감 전에는 미출석·미참여에 N점을 매기지 않고(화면은 "집계 전"), 회차 점수도 누적에 넣지 않습니다.
+        if not closed and not rnd['score']['mismatch']:
+            rnd['score']['points'].update({u: None for u in league['members'] if not rnd['records'].get(u)})
+        rnd['counted'] = closed and not rnd['score']['mismatch']
+        pending |= active and (rnd['score']['mismatch'] or not closed)
         if rnd['counted']:
             for u, p in rnd['score']['points'].items():
                 totals[u] += p
