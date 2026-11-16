@@ -17,6 +17,11 @@ from urllib.parse import quote, unquote
 
 URL = 'https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo'
 PATH = Path(__file__).resolve().parent.parent / 'web' / 'holidays.json'
+# API가 주는 이름을 달력에 보일 익숙한 이름으로 바꿉니다. 여기에도 KNOWN에도 없는 이름은 그대로 넣고 한 줄로 알립니다.
+RENAME = {'1월1일': '신정', '기독탄신일': '성탄절'}
+EVE = {'설날': '설 연휴', '추석': '추석 연휴'}  # API는 연휴 사흘에 모두 같은 이름을 줍니다. 가운데 날만 그 이름으로 둡니다.
+KNOWN = {'설날', '삼일절', '노동절', '어린이날', '부처님오신날', '현충일', '제헌절', '광복절', '추석', '개천절', '한글날', '대체공휴일', '임시공휴일',
+         '국회의원선거일', *RENAME.values(), *EVE.values()}
 USAGE = '사용법: KASI_SERVICE_KEY=... python3 scripts/holidays.py [--dry-run] [연도 ...] (연도는 2000~2099)'
 
 
@@ -89,6 +94,23 @@ def parse(raw, year, month):
     return days
 
 
+def tidy(days):
+    """{날짜: [API 이름]}의 이름을 달력에 보일 이름으로 바꿉니다. 이미 바꾼 이름을 다시 넣어도 그대로입니다."""
+    out = {}
+    for iso, names in days.items():
+        d = date.fromisoformat(iso)
+        near = [days.get((d + timedelta(n)).isoformat(), []) for n in (-1, 1)]
+        for name in names:
+            if name in EVE and sum(name in n for n in near) == 1:  # 같은 이름이 한쪽에만 이어지면 연휴의 첫날이나 끝날
+                name = EVE[name]
+            elif name.startswith('대체공휴일('):
+                name = '대체공휴일'
+            name = RENAME.get(name, name)
+            if name not in out.setdefault(iso, []):
+                out[iso].append(name)
+    return out
+
+
 def year_holidays(year, get):
     days = {}
     for month in range(1, 13):
@@ -97,7 +119,7 @@ def year_holidays(year, get):
                 days[iso].append(name)
     if not days:
         raise Empty(f'{year}년 공휴일이 하나도 오지 않았습니다. 아직 발표 전이면 그 해를 빼고 실행해 주세요.')
-    return {iso: ', '.join(names) for iso, names in days.items()}
+    return {iso: ', '.join(names) for iso, names in tidy(days).items()}
 
 
 def read(path):
@@ -147,6 +169,9 @@ def main(argv=None, env=os.environ, get=None, path=PATH):
             print(f'- {d} {old[d]}')
         if d in new:
             print(f'+ {d} {new[d]}')
+    unknown = sorted({n for names in fresh.values() for n in names.split(', ')} - KNOWN)
+    if unknown:
+        print(f'매핑 없는 이름: {", ".join(unknown)} (그대로 넣었습니다. 어색하면 scripts/holidays.py의 RENAME에 추가해 주세요)')
     label = '·'.join(map(str, years))
     print(f'{label}년: 바뀐 날짜 {len(changed)}개' + (' (--dry-run: 파일은 쓰지 않았습니다)' if dry else ''))
     if not dry:

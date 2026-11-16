@@ -171,10 +171,34 @@ class HolidayChecks(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertNotIn(KEY, text)
 
+    def test_names_are_made_familiar(self):
+        raw = {(2028, 1): xml(('20280101', '1월1일', 'Y'), ('20280126', '설날', 'Y'), ('20280127', '설날', 'Y'), ('20280128', '설날', 'Y')),
+               (2028, 4): xml(('20280412', '국회의원선거일', 'Y'), ('20280420', '처음 보는 날', 'Y')),
+               (2028, 10): xml(('20281002', '추석', 'Y'), ('20281003', '개천절', 'Y'), ('20281003', '추석', 'Y'), ('20281004', '추석', 'Y'), ('20281005', '대체공휴일(추석)', 'Y')),
+               (2028, 12): xml(('20281225', '기독탄신일', 'Y'), ('20281226', '대체공휴일(기독탄신일)', 'Y'), ('20281226', '대체공휴일(다른 날)', 'Y'))}
+        want = {'2028-01-01': '신정', '2028-01-26': '설 연휴', '2028-01-27': '설날', '2028-01-28': '설 연휴', '2028-04-12': '국회의원선거일', '2028-04-20': '처음 보는 날',
+                '2028-10-02': '추석 연휴', '2028-10-03': '개천절, 추석', '2028-10-04': '추석 연휴', '2028-10-05': '대체공휴일', '2028-12-25': '성탄절', '2028-12-26': '대체공휴일'}
+        code, text = self.run_main(['2028'], api(raw))
+        self.assertEqual(code, 0, text)
+        self.assertEqual({d: n for d, n in self.saved().items() if d.startswith('2028')}, want)
+        # 매핑에 없는 이름은 그대로 넣고 한 줄로 알리되 실패는 아닙니다. 아는 이름은 알리지 않습니다.
+        self.assertEqual([line for line in text.splitlines() if '매핑 없는 이름' in line][0].split(' (')[0], '매핑 없는 이름: 처음 보는 날')
+        # 이미 바꾼 이름을 다시 넣어도 그대로이고 알림도 없습니다.
+        again = {}
+        for d, names in want.items():
+            if d != '2028-04-20':
+                again.setdefault((2028, int(d[5:7])), []).extend((d.replace('-', ''), n, 'Y') for n in names.split(', '))
+        code, text = self.run_main(['--dry-run', '2028'], api({k: xml(*v) for k, v in again.items()}))
+        self.assertEqual(code, 0, text)
+        self.assertEqual(text.splitlines()[:-1], ['- 2028-04-20 처음 보는 날'])
+        # 하루만 온 설날·추석은 연휴로 바꾸지 않습니다.
+        self.assertEqual(holidays.tidy({'2028-01-27': ['설날'], '2028-10-03': ['추석']}), {'2028-01-27': ['설날'], '2028-10-03': ['추석']})
+
     def test_shipped_table(self):
         table = holidays.read(ROOT / 'web' / 'holidays.json')
         self.assertEqual(list(table), sorted(table))
-        for day, name in {'2026-12-25': '성탄절', '2027-02-09': '대체공휴일', '2027-09-15': '추석', '2027-12-27': '대체공휴일'}.items():
+        for day, name in {'2026-12-25': '성탄절', '2027-02-09': '대체공휴일', '2027-09-15': '추석', '2027-12-27': '대체공휴일',
+                          '2028-01-01': '신정', '2028-01-26': '설 연휴', '2028-01-27': '설날', '2028-10-03': '개천절, 추석', '2028-10-05': '대체공휴일', '2028-12-25': '성탄절'}.items():
             self.assertEqual(table.get(day), name)
 
 
