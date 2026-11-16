@@ -1,4 +1,4 @@
-# /etc/systemd/system/wokkiri.service 로 복사합니다. 코드는 /opt/wokkiri, 데이터는 /opt/wokkiri/data 기준입니다.
+# /etc/systemd/system/wokkiri.service 로 복사합니다. 코드는 /opt/wokkiri/releases/current(배포 스크립트가 바꾸는 링크), 데이터는 /opt/wokkiri/data 기준입니다.
 [Unit]
 Description=Wokkiri server
 After=network.target
@@ -6,9 +6,9 @@ After=network.target
 [Service]
 User=wokkiri
 Group=wokkiri
-WorkingDirectory=/opt/wokkiri
+WorkingDirectory=/opt/wokkiri/releases/current
 EnvironmentFile=/etc/wokkiri.env
-ExecStart=/usr/bin/python3 /opt/wokkiri/app.py
+ExecStart=/usr/bin/python3 /opt/wokkiri/releases/current/app.py
 Restart=on-failure
 RestartSec=3
 
