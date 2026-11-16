@@ -53,9 +53,12 @@ finish() {
     set +e
     if [ "$state" = swapped ]; then   # 링크를 바꾼 뒤 끝까지 가지 못했습니다. 이유가 무엇이든 같은 순서로 되돌립니다.
         code=1
-        point "$prev"
-        sudo -n /usr/bin/systemctl restart wokkiri
-        if healthy; then
+        # 되돌렸다는 말은 링크가 실제로 이전 릴리스를 가리키고 재시작까지 된 것을 확인한 뒤에만 합니다.
+        if ! point "$prev" || [ "$(readlink "$BASE/current")" != "$prev" ]; then
+            printf '복원 실패: current 링크를 이전 릴리스(%s)로 되돌리지 못했습니다. 지금 링크는 %s입니다. VM에서 확인해 주세요.\n' "$prev" "$(readlink "$BASE/current")" >&2
+        elif ! sudo -n /usr/bin/systemctl restart wokkiri; then
+            printf '복원 실패: 링크는 이전 릴리스(%s)로 되돌렸지만 서비스를 다시 시작하지 못했습니다. VM에서 확인해 주세요.\n' "$prev" >&2
+        elif healthy; then
             printf '이전 릴리스(%s)로 되돌렸습니다. 서비스는 정상입니다.\n' "$prev" >&2
         else
             printf '이전 릴리스(%s)로 되돌렸지만 서비스가 아직 응답하지 않습니다. VM에서 확인해 주세요.\n' "$prev" >&2
