@@ -37,7 +37,8 @@ const day = n => new Date(n*1000 + 9*3600000).toISOString().slice(0, 10);
 const name = u => e(names[u]);
 // 선택지가 적고 고정된 항목은 한눈에 보이는 버튼 묶음으로, 회원 목록처럼 길어지는 항목만 select로 둡니다.
 const choices = (legend, field, items, current, cls = '') => {
-  const on = items.some(([v]) => v === current) ? current : items[0][0];
+  // current가 null이면 아무것도 고르지 않은 채로 시작합니다.
+  const on = items.some(([v]) => v === current) || current === null ? current : items[0][0];
   return `<fieldset class="choice ${cls}"><legend>${legend}</legend>${items.map(([v, t]) => `<label><input type="radio" name="${field}" value="${e(v)}" ${v === on ? 'checked' : ''}>${e(t)}</label>`).join('')}</fieldset>`;
 };
 const options = (items, current) => items.map(([v, t]) => `<option value="${e(v)}" ${v === current ? 'selected' : ''}>${e(t)}</option>`).join('');
@@ -302,7 +303,7 @@ function requestsPanel(l, panel) {
     ${q.reply ? `<p class="sub">본인 답변: ${e(q.reply)}</p>` : ''}${q.decisionReason ? `<p class="sub">판정 이유: ${e(q.decisionReason)}</p>` : ''}${q.decision ? `<p class="ok">${e(q.decision)}</p>` : ''}
     ${waiting(q, state.actor) ? `<form class="resolve" data-request="${q.id}" data-mode="${q.status}">${q.status === 'author'
       ? '<label>한마디 (거절할 때는 이유를 꼭 적어 주세요)<textarea name="reason" maxlength="1000"></textarea></label><div class="row"><button name="choice" value="accept">수락하고 반영</button><button name="choice" value="reject" class="secondary">거절</button></div>'
-      : choices('판정', 'decision', [['keep','기존 기록 유지'], ['modify','요청대로 반영'], ['invalidate','기록 삭제']]) + '<label>이유<textarea name="reason" required maxlength="1000"></textarea></label><button>판정 완료</button>'}</form>` : ''}</section>`;
+      : choices('판정', 'decision', [['keep','기존 기록 유지'], ['modify','요청대로 반영'], ['invalidate','기록 삭제']], null) + '<label>이유<textarea name="reason" required maxlength="1000"></textarea></label><p class="sub">판정을 하나 골라야 완료할 수 있어요.</p><button disabled>판정 완료</button>'}</form>` : ''}</section>`;
   panel.innerHTML = `<p class="sub">다른 회원 기록에 대한 요청은 본인이 수락하면 바로 반영돼요. 생각이 다르면 판정자가 정해 줘요. 마감 뒤 내 기록 수정이나 늦은 제출도 판정자가 확인해 줘요.</p>${l.requests.slice().reverse().map(item).join('') || '<section>아직 요청이 없어요.</section>'}`;
 }
 
@@ -416,6 +417,7 @@ document.addEventListener('click', async ev => {
 
 document.addEventListener('change', ev => {
   if (ev.target.id === 'saved') $('[data-continue]').disabled = !ev.target.checked;
+  if (ev.target.name === 'decision') ev.target.form.querySelector('button').disabled = false;
   if (ev.target.closest('#create') && ev.target.name !== 'name') calendar();
 });
 

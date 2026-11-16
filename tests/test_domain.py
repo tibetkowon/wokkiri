@@ -109,6 +109,14 @@ class Rules(unittest.TestCase):
         self.run_action('ga',action='reply',request=q['id'],accept=False,reason='다시 확인해 주세요.')
         with self.assertRaises(ValueError):
             self.run_action('ra',action='decide',request=q['id'],decision='invalidate',reason='확인했습니다.')
+        # 판정 값이 없거나 비었거나 목록 밖이면 거부하고 요청은 그대로 둡니다.
+        before=copy.deepcopy(self.r['records']['ga'])
+        for bad in ({}, {'decision':''}, {'decision':None}, {'decision':'bogus'}):
+            with self.assertRaises(ValueError):
+                self.run_action('da',action='decide',request=q['id'],reason='확인했습니다.',**bad)
+        self.assertEqual(q['status'],'judge')
+        self.assertEqual(q['decision'],'')
+        self.assertEqual(self.r['records']['ga'],before)
         self.run_action('da',now=NOW+999999,action='decide',request=q['id'],decision='invalidate',reason='확인했습니다.')
         self.assertIsNone(self.r['records']['ga'])
         self.assertEqual(q['decision'],'기록 삭제')
