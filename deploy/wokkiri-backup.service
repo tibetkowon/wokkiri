@@ -1,0 +1,21 @@
+# /etc/systemd/system/wokkiri-backup.service 로 복사합니다. 매일 cron과 배포 스크립트가 이 단위를 시작합니다(docs/deploy.md 7절).
+# 지금 릴리스의 scripts/backup.py를 서버와 같은 계정·같은 보호 옵션으로 한 번 실행합니다.
+[Unit]
+Description=Wokkiri DB backup
+
+[Service]
+Type=oneshot
+User=wokkiri
+Group=wokkiri
+WorkingDirectory=/opt/wokkiri/releases/current
+EnvironmentFile=/etc/wokkiri.env
+# 버킷에도 올리려면 이 파일에 WOKKIRI_BACKUP_BUCKET=<버킷> 한 줄을 둡니다. 없으면 로컬 백업만 합니다.
+EnvironmentFile=-/etc/wokkiri-backup.env
+ExecStart=/usr/bin/python3 /opt/wokkiri/releases/current/scripts/backup.py
+TimeoutStartSec=600
+
+ProtectSystem=strict
+ReadWritePaths=/opt/wokkiri/data
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
