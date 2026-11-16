@@ -2,9 +2,9 @@
 
 VM 한 대에 Python 서버, SQLite 파일, Caddy(HTTPS 자동)를 올리는 순서입니다.
 
-**확인한 범위(2026-11-15, Debian 12, Python 3.11.2, Caddy 2.6.2):** 5절의 스왑·"처음 설치", 6절 Caddy(인증서 발급), 7절의 cron 등록·수동 백업·내 컴퓨터로 가져오기는 실제 VM에서 실행해 확인했습니다. 매일 18:30(UTC)의 cron 자동 실행은 2026-11-15 18:30(UTC)에 돌아 버킷에 파일이 생긴 것을 2026-11-16에 확인했습니다. **확인되지 않음:** 1~3절의 콘솔 메뉴(VM·방화벽·고정 IP·예산은 `gcloud` 명령으로 만들었습니다), 5절 "코드 갱신", 7절의 되돌리기 명령, 인증서 자동 갱신입니다. 7절의 오프사이트 백업(버킷·권한·범위·cron)과 "버킷 사본으로 복원"은 같은 날 실제로 실행해 확인했습니다.
+**확인한 범위(2026-11-15, Debian 12, Python 3.11.2, Caddy 2.6.2):** 5절의 스왑·"처음 설치", 6절 Caddy(인증서 발급), 7절의 cron 등록·수동 백업·내 컴퓨터로 가져오기는 실제 VM에서 실행해 확인했습니다. 매일 18:30(UTC)의 cron 자동 실행은 2026-11-15 18:30(UTC)에 돌아 버킷에 파일이 생긴 것을 2026-11-16에 확인했습니다. **확인되지 않음:** 1~3절의 콘솔 메뉴(VM·방화벽·고정 IP·예산은 `gcloud` 명령으로 만들었습니다), 5절 "코드 갱신", 7절의 되돌리기 명령, 인증서 자동 갱신입니다. 7절의 오프사이트 백업(버킷·권한·범위·cron)과 "버킷 사본으로 복원"은 같은 날 실제로 실행해 확인했습니다. 9절(CI/CD)은 2026-11-16에 기존 VM을 릴리스 폴더 구조로 옮기면서 확인했고, 그래서 5절 "처음 설치"의 릴리스 폴더 명령을 새 VM에서 처음부터 실행해 보지는 않았습니다(확인되지 않음).
 
-아래에서 `wokkiri.example.com`은 실제 주소로, `VM이름`·`영역`은 만든 값으로 바꿉니다. `gcloud`의 기본 프로젝트가 다른 프로젝트면 `gcloud compute` 명령마다 `--project 프로젝트ID`를 붙입니다. 기준은 Debian 12 이미지, 코드 `/opt/wokkiri`, 데이터 `/opt/wokkiri/data`입니다.
+아래에서 `wokkiri.example.com`은 실제 주소로, `VM이름`·`영역`은 만든 값으로 바꿉니다. `gcloud`의 기본 프로젝트가 다른 프로젝트면 `gcloud compute` 명령마다 `--project 프로젝트ID`를 붙입니다. 기준은 Debian 12 이미지, 코드 `/opt/wokkiri/releases/current`(릴리스 폴더를 가리키는 링크, 9절), 데이터 `/opt/wokkiri/data`입니다.
 
 ## 1. 결제 계정과 예산 알림
 
@@ -56,18 +56,22 @@ sudo apt update && sudo apt -y upgrade
 
 ### 처음 설치
 
-VM 안에서 한 번만 실행합니다. 코드는 root 소유(서버가 고칠 수 없음), `data/`만 `wokkiri` 소유입니다. `--no-same-owner`로 풀면 풀린 파일이 root 소유가 되므로 `chown -R`은 쓰지 않습니다.
+VM 안에서 한 번만 실행합니다. 코드는 배포 계정 `wokkiri-deploy` 소유의 릴리스 폴더에 두고(서버 계정은 고칠 수 없음), `data/`만 서버 계정 `wokkiri` 소유입니다. 릴리스마다 `data` 링크가 `/opt/wokkiri/data`를 가리켜 데이터는 한 벌만 있습니다.
 
 ```sh
 python3 --version                      # 3.9 이상이어야 합니다
 sudo useradd --system --home-dir /opt/wokkiri --shell /usr/sbin/nologin wokkiri
-sudo mkdir -p /opt/wokkiri
-sudo tar --no-same-owner -xzf /tmp/wokkiri.tar.gz -C /opt/wokkiri
+sudo useradd --system --create-home --home-dir /var/lib/wokkiri-deploy --shell /bin/sh wokkiri-deploy
 sudo install -d -o wokkiri -g wokkiri -m 700 /opt/wokkiri/data
+R=/opt/wokkiri/releases; ID=$(date -u +%Y%m%d-%H%M%S)
+sudo install -d -o wokkiri-deploy -g wokkiri-deploy -m 755 $R $R/$ID
+sudo -u wokkiri-deploy tar --no-same-owner -xzf /tmp/wokkiri.tar.gz -C $R/$ID
+sudo -u wokkiri-deploy ln -s /opt/wokkiri/data $R/$ID/data
+sudo -u wokkiri-deploy ln -s $ID $R/current
 
-sudo install -m 640 /opt/wokkiri/deploy/wokkiri.env.example /etc/wokkiri.env
+sudo install -m 640 $R/current/deploy/wokkiri.env.example /etc/wokkiri.env
 sudo nano /etc/wokkiri.env             # WOKKIRI_HOST를 실제 주소로 바꿉니다(또는 sudo sed -i 's/wokkiri\.example\.com/실제주소/' /etc/wokkiri.env)
-sudo cp /opt/wokkiri/deploy/wokkiri.service /etc/systemd/system/
+sudo cp $R/current/deploy/wokkiri.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now wokkiri
 systemctl status wokkiri
@@ -89,22 +93,13 @@ curl -s -H 'Host: wokkiri.example.com' http://127.0.0.1:8000/api/state   # {"act
 
 ### 코드 갱신
 
-내 컴퓨터에서 위와 같이 압축을 만들어 올린 뒤, VM 안에서 아래만 실행합니다. 압축에 `data/`가 없으므로 DB와 백업은 내용도 소유권도 그대로입니다. **갱신할 때 `/opt/wokkiri`에 `chown -R`을 하지 마세요.** `data/` 아래의 DB와 백업까지 root 소유가 되어 서버가 DB에 쓰지 못합니다.
-
-```sh
-sudo tar --no-same-owner -xzf /tmp/wokkiri.tar.gz -C /opt/wokkiri
-sudo systemctl restart wokkiri
-systemctl status wokkiri
-sudo ls -ln /opt/wokkiri/data           # DB와 backups의 소유자가 그대로 wokkiri인지 봅니다
-```
-
-저장소에서 지운 파일은 VM에 남습니다(동작에는 영향이 없습니다). `deploy/wokkiri.service`나 환경변수 예시가 바뀌었으면 위 "처음 설치"의 해당 줄을 다시 실행합니다. 실수로 소유권을 바꿨다면 `sudo chown -R wokkiri:wokkiri /opt/wokkiri/data`로 되돌립니다.
+9절의 배포 스크립트로 합니다(태그 push, 수동 실행, 또는 내 컴퓨터의 `scripts/deploy.sh`). 압축에 `data/`가 없으므로 DB와 백업은 내용도 소유권도 그대로입니다. `deploy/wokkiri.service`나 환경변수 예시, `deploy/wokkiri-deploy.sh`가 바뀌었으면 배포로는 반영되지 않으니 해당 설치 줄을 VM에서 다시 실행합니다.
 
 ## 6. Caddy
 
 ```sh
 sudo apt update && sudo apt install -y caddy
-sudo cp /opt/wokkiri/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo cp /opt/wokkiri/releases/current/deploy/Caddyfile /etc/caddy/Caddyfile
 sudo nano /etc/caddy/Caddyfile         # 주소를 실제 값으로 바꿉니다
 sudo caddy validate --config /etc/caddy/Caddyfile   # "Valid configuration"이 나와야 합니다
 sudo systemctl reload caddy
@@ -118,8 +113,8 @@ Debian 12의 `apt`로 깔리는 Caddy는 2.6.2이고 설치하면 바로 켜져 
 매일 한 번 백업하고 최근 14개를 둡니다. VM 시계는 UTC이므로 아래는 한국 시간 03:30입니다.
 
 ```sh
-echo '30 18 * * * wokkiri /usr/bin/python3 /opt/wokkiri/scripts/backup.py' | sudo tee /etc/cron.d/wokkiri-backup
-sudo -u wokkiri /usr/bin/python3 /opt/wokkiri/scripts/backup.py    # 한 번 직접 돌려 파일 경로가 출력되는지 봅니다
+echo '30 18 * * * wokkiri /usr/bin/python3 /opt/wokkiri/releases/current/scripts/backup.py' | sudo tee /etc/cron.d/wokkiri-backup
+sudo -u wokkiri /usr/bin/python3 /opt/wokkiri/releases/current/scripts/backup.py    # 한 번 직접 돌려 파일 경로가 출력되는지 봅니다
 sudo ls -l /opt/wokkiri/data/backups
 ```
 
@@ -153,8 +148,8 @@ gcloud compute instances start VM이름 --zone 영역
 cron은 `/etc/wokkiri.env`를 읽지 않으므로(서비스 전용, root만 읽음) 버킷 이름은 cron 파일 첫 줄에 둡니다. VM에 메일 프로그램이 없어 cron이 출력을 버리므로 `logger`로 시스템 로그에 남깁니다. VM 안에서 실행합니다.
 
 ```sh
-printf 'WOKKIRI_BACKUP_BUCKET=<버킷>\n30 18 * * * wokkiri /usr/bin/python3 /opt/wokkiri/scripts/backup.py 2>&1 | /usr/bin/logger -t wokkiri-backup\n' | sudo tee /etc/cron.d/wokkiri-backup
-sudo -u wokkiri env WOKKIRI_BACKUP_BUCKET=<버킷> /usr/bin/python3 /opt/wokkiri/scripts/backup.py   # 직접 돌릴 때는 변수를 같이 줍니다
+printf 'WOKKIRI_BACKUP_BUCKET=<버킷>\n30 18 * * * wokkiri /usr/bin/python3 /opt/wokkiri/releases/current/scripts/backup.py 2>&1 | /usr/bin/logger -t wokkiri-backup\n' | sudo tee /etc/cron.d/wokkiri-backup
+sudo -u wokkiri env WOKKIRI_BACKUP_BUCKET=<버킷> /usr/bin/python3 /opt/wokkiri/releases/current/scripts/backup.py   # 직접 돌릴 때는 변수를 같이 줍니다
 sudo journalctl -t wokkiri-backup -n 20     # cron이 돌린 결과: 파일 경로만 있으면 성공, "실패"가 있으면 종료 코드가 같이 남습니다
 ```
 
@@ -247,6 +242,108 @@ sudo systemctl start wokkiri
 - [x] VM을 다시 시작한 뒤에도 서비스·Caddy·스왑이 뜨고 DB와 백업 파일이 남아 있습니다.
 - [x] 백업 파일이 매일 생기고, 내 컴퓨터로 가져온 사본이 열립니다. (수동 백업과 가져오기는 2026-11-15, cron의 자동 실행은 2026-11-16에 버킷 업로드까지 확인)
 - [x] 버킷에 사본이 올라가고(`gcloud storage ls -l gs://<버킷>/`), 받은 사본이 `PRAGMA integrity_check`에서 `ok`이며, VM에서는 버킷 객체를 지우거나 읽지 못합니다.
+
+## 9. CI/CD (GitHub Actions)
+
+- `.github/workflows/test.yml`: `main`에 push하거나 PR을 열 때마다 테스트를 돌립니다. 비밀값을 쓰지 않습니다.
+- `.github/workflows/deploy.yml`: `v*` 태그를 push하거나 수동으로 실행하면 테스트를 돌린 뒤 통과했을 때만 `scripts/deploy.sh`로 VM에 배포합니다.
+- `scripts/deploy.sh`: 테스트 → 커밋하지 않은 변경이 없는지 확인 → `git archive HEAD` → ssh로 VM에 전송 → `https` 응답 확인.
+- `deploy/wokkiri-deploy.sh`(VM의 `/usr/local/bin/wokkiri-deploy`): 받은 압축을 검사해(20MB 이하, 풀면 100MB 이하, 절대 경로·`..`·링크 거부) `/opt/wokkiri/releases/<UTC 시각>/`에 풀고 → 지금 릴리스의 `scripts/backup.py`로 DB를 백업하고(실패하면 중단) → `current` 링크를 바꾸고 → `systemctl restart wokkiri` → `127.0.0.1`에 2초 간격으로 10번까지 물어봅니다. 응답이 없으면 링크를 이전 릴리스로 되돌려 다시 시작하고 실패로 끝납니다. 성공하면 릴리스는 최근 5개만 남깁니다. 동시에 두 번 실행되지 않습니다.
+
+배포 키로는 이 스크립트 한 가지만 실행됩니다(`authorized_keys`의 강제 명령). 셸, 다른 명령, sftp, 포트 전달은 되지 않는 것을 확인했습니다. 배포마다 `data/backups`에 백업이 하나 생기므로 보관 개수 14개에는 배포 전 백업도 들어갑니다(매일 백업의 사본은 버킷에 따로 있습니다). 실패한 배포를 되돌리는 동안에는 20초 남짓 응답이 끊깁니다.
+
+### VM에 한 번 설치
+
+5절 "처음 설치"로 배포 계정과 릴리스 폴더가 있는 상태에서, 내 컴퓨터의 저장소 폴더에서 스크립트를 올리고 VM 안에서 설치합니다.
+
+```sh
+gcloud compute scp deploy/wokkiri-deploy.sh VM이름:/tmp/ --zone 영역
+gcloud compute ssh VM이름 --zone 영역
+```
+
+```sh
+sudo install -o root -g root -m 755 /tmp/wokkiri-deploy.sh /usr/local/bin/wokkiri-deploy
+# 상태 확인에 쓸 Host 값입니다(배포 계정은 /etc/wokkiri.env를 읽지 못합니다)
+sudo grep '^WOKKIRI_HOST=' /etc/wokkiri.env | cut -d= -f2 | sudo tee /etc/wokkiri-deploy.host > /dev/null
+# 배포 계정이 sudo로 할 수 있는 일: 서비스 재시작, 서버 계정으로 백업 스크립트 실행
+printf '%s\n' 'wokkiri-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart wokkiri' 'wokkiri-deploy ALL=(wokkiri) NOPASSWD: /usr/bin/python3 /opt/wokkiri/releases/current/scripts/backup.py' > /tmp/sudoers-wd
+sudo visudo -cf /tmp/sudoers-wd         # "parsed OK"가 나와야 합니다
+sudo install -o root -g root -m 440 /tmp/sudoers-wd /etc/sudoers.d/wokkiri-deploy && rm /tmp/sudoers-wd
+# 배포 계정이 자기 키 목록을 고치지 못하게 홈과 .ssh는 root 소유로 둡니다
+sudo chown root:root /var/lib/wokkiri-deploy && sudo chmod 755 /var/lib/wokkiri-deploy
+sudo install -d -o root -g root -m 755 /var/lib/wokkiri-deploy/.ssh
+```
+
+`deploy/wokkiri-deploy.sh`를 고치면 위 첫 두 줄(올리기와 `install`)을 다시 실행합니다.
+
+### 배포 키 만들기와 교체
+
+내 컴퓨터에서 실행합니다. 키는 저장소 밖 임시 폴더에 만들고, Secret에 넣은 뒤 지웁니다. 교체할 때도 같은 순서이고, `authorized_keys`를 새 파일로 덮어쓰므로 이전 키는 그 순간 못 쓰게 됩니다.
+
+```sh
+umask 077; K=$(mktemp -d)
+ssh-keygen -q -t ed25519 -N '' -C wokkiri-deploy-ci -f $K/key
+printf 'command="/usr/local/bin/wokkiri-deploy",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,restrict %s\n' "$(cat $K/key.pub)" > $K/authorized_keys
+gcloud compute scp $K/authorized_keys VM이름:/tmp/wd-ak --zone 영역
+gcloud compute ssh VM이름 --zone 영역 --command 'sudo install -o root -g root -m 644 /tmp/wd-ak /var/lib/wokkiri-deploy/.ssh/authorized_keys && rm /tmp/wd-ak'
+gh secret set DEPLOY_SSH_KEY --env production < $K/key
+rm -r $K
+```
+
+내 컴퓨터에서 `scripts/deploy.sh`를 계속 쓰려면 Secret용과 별도로 키를 하나 더 만들어 `authorized_keys`에 같은 형식으로 한 줄 더 넣고 개인키를 저장소 밖에 보관합니다(두 줄짜리 구성은 확인되지 않음).
+
+### Secrets
+
+GitHub 저장소의 `production` 환경에 둡니다(`gh secret set 이름 --env production`). 이 환경은 `main` 브랜치와 `v*` 태그에서만 배포할 수 있게 해 두었습니다.
+
+| 이름 | 값 |
+| --- | --- |
+| `DEPLOY_SSH_KEY` | 배포 개인키(위에서 만든 `key` 파일 내용) |
+| `DEPLOY_HOST` | VM 주소(고정 IP) |
+| `DEPLOY_KNOWN_HOSTS` | `<고정 IP> ssh-ed25519 AAAA...` 한 줄. VM 안에서 `cat /etc/ssh/ssh_host_ed25519_key.pub`로 본 값의 앞 두 칸에 주소를 붙입니다. 이 값과 다른 호스트 키면 배포가 멈춥니다. |
+| `DEPLOY_URL` | 배포 뒤 확인할 주소(`https://wokkiri.example.com/`) |
+
+VM을 새로 만들거나 호스트 키가 바뀌면 `DEPLOY_KNOWN_HOSTS`를, 고정 IP나 주소가 바뀌면 `DEPLOY_HOST`·`DEPLOY_KNOWN_HOSTS`·`DEPLOY_URL`과 VM의 `/etc/wokkiri-deploy.host`를 다시 넣습니다.
+
+### 배포하기
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0       # 태그로 배포
+gh workflow run deploy.yml --ref main          # 태그 없이 main의 최신 커밋을 배포(수동 실행)
+gh run watch                                   # 진행 상황
+```
+
+내 컴퓨터에서 직접 배포할 때는 값을 환경변수로 줍니다(실제 값은 `docs/ops.local.md`).
+
+```sh
+DEPLOY_HOST=<고정 IP> DEPLOY_KEY_FILE=<개인키 경로> DEPLOY_KNOWN_HOSTS_FILE=<known_hosts 경로> DEPLOY_URL=https://wokkiri.example.com/ scripts/deploy.sh
+```
+
+### 되돌리기
+
+새 릴리스가 뜨지 않으면 배포 스크립트가 스스로 이전 릴리스로 되돌립니다. 떴지만 내용에 문제가 있어 직접 되돌릴 때는 이전 커밋에 태그를 붙여 다시 배포하거나, VM 안에서 링크를 바꿉니다.
+
+```sh
+ls /opt/wokkiri/releases; readlink /opt/wokkiri/releases/current
+sudo -u wokkiri-deploy ln -sfn <릴리스 폴더 이름> /opt/wokkiri/releases/.current.new
+sudo -u wokkiri-deploy mv -T /opt/wokkiri/releases/.current.new /opt/wokkiri/releases/current
+sudo systemctl restart wokkiri
+```
+
+코드만 되돌아갑니다. DB는 그대로이므로 데이터까지 되돌리려면 7절의 배포 전 백업 파일(`data/backups`)로 복원합니다.
+
+### 배포 키 폐기와 CI/CD 없애기
+
+```sh
+# 키만 폐기: VM 안에서
+sudo rm /var/lib/wokkiri-deploy/.ssh/authorized_keys
+# 내 컴퓨터에서
+gh secret delete DEPLOY_SSH_KEY --env production
+# 전부 없애기: VM 안에서(릴리스 폴더와 서비스는 그대로 둡니다)
+sudo rm /etc/sudoers.d/wokkiri-deploy /usr/local/bin/wokkiri-deploy /etc/wokkiri-deploy.host
+```
+
+이 절의 지우는 명령은 실행해 보지 않았습니다(확인되지 않음).
 
 ## 알아 둘 한계
 
