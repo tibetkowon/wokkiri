@@ -2,6 +2,6 @@
   "reader": {"agent": "claude", "model": "claude-haiku-5-5"},
   "chore": {"agent": "claude", "model": "claude-haiku-5-5"},
   "ops": {"agent": "claude", "model": "claude-sonnet-5-5"},
-  "coder": {"agent": "claude", "model": "claude-fable-5-2"},
+  "coder": {"agent": "claude", "model": "claude-sonnet-5-5"},
   "verifier": {"agent": "codex", "model": "gpt-6.1-sol", "effort": "medium"}
 }

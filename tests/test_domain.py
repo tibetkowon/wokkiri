@@ -1,4 +1,6 @@
 import copy
+import os
+import time
 import unittest
 from domain import DEMO_NAMES, apply, initial, round_scores, view, record, schedule, stamp
 
@@ -306,6 +308,43 @@ class Rules(unittest.TestCase):
             self.request(actor='ra',judge='da')
         with self.assertRaises(ValueError):
             self.run_action('ga',now=self.r['start'],action='record',version=999,record=reps(1))
+
+class KoreanClock(unittest.TestCase):
+    def test_stamp_is_korean_midnight(self):
+        # 2026-12-21 15:00:00 UTC. 기대값은 stamp로 다시 계산하지 않고 고정 숫자로 둡니다.
+        self.assertEqual(stamp('2026-12-22'), 1797865200.0)
+
+    def test_deadline_is_korean_midnight_not_utc_midnight(self):
+        # 12/01 라운드는 한국 12/02 00:00(UTC 12/01 15:00)에 마감합니다. UTC 자정(한국 12/02 09:00)에는 아무 일도 없습니다.
+        cases = [(1796137199, True), (1796137200, False), (1796137200 + 1800, False),
+                 (1796137200 + 9*3600 - 1, False), (1796137200 + 9*3600, False)]
+        old_tz = os.environ.get('TZ')
+        zones = ['Asia/Seoul', 'UTC'] + (['America/Chicago'] if hasattr(time, 'tzset') else [])
+        try:
+            for zone in zones:
+                os.environ['TZ'] = zone
+                if hasattr(time, 'tzset'):
+                    time.tzset()
+                for now, open_ in cases:
+                    with self.subTest(zone=zone, now=now):
+                        state = initial(NOW)
+                        state['users'] = {u: dict(name=n) for u, n in DEMO_NAMES.items()}
+                        lid = apply(state, 'ga', dict(action='create', name='경계', kind='designated', start='2026-12-01', count=1, duration=1), NOW)
+                        self.assertEqual(state['leagues'][-1]['rounds'][0]['close'], 1796137200.0)
+                        apply(state, 'na', dict(action='join', invite=state['leagues'][-1]['invite']), NOW)
+                        record_it = lambda: apply(state, 'na', dict(action='record', league=lid, round='0', version=0, record=reps(1)), now)
+                        if open_:
+                            record_it()
+                        else:
+                            with self.assertRaises(ValueError):
+                                record_it()
+        finally:
+            if old_tz is None:
+                os.environ.pop('TZ', None)
+            else:
+                os.environ['TZ'] = old_tz
+            if hasattr(time, 'tzset'):
+                time.tzset()
 
 if __name__=='__main__':
     unittest.main()
