@@ -139,6 +139,52 @@ function notify(t) {
   timer = setTimeout(() => $('#message').textContent = '', 5000);
 }
 
+// 사진은 올리기 전에 브라우저에서 줄입니다. 서버(2MB, PNG·JPEG 확인)가 최종 검증입니다.
+const PHOTO_MAX = 2*1024*1024;
+const fitSize = (w, h, max) => { const s = Math.min(1, max / Math.max(w, h)); return [Math.max(1, Math.round(w*s)), Math.max(1, Math.round(h*s))]; };
+const readDataUrl = (file, fail) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(Error(fail));
+  reader.readAsDataURL(file);
+});
+// 회전 정보(EXIF)를 지켜 읽습니다. 옵션을 모르는 브라우저는 Image로 읽습니다(data: 주소라 CSP 그대로).
+async function decodePhoto(file) {
+  try { return await createImageBitmap(file, {imageOrientation:'from-image'}); } catch {}
+  const img = new Image();
+  img.src = await readDataUrl(file, '사진을 읽지 못했습니다. 다시 선택해 주세요.');
+  await img.decode();
+  return img;
+}
+async function shrinkPhoto(file) {
+  const ok = file.type === 'image/jpeg' || file.type === 'image/png';
+  let img;
+  try { img = await decodePhoto(file); } catch {
+    if (ok && file.size <= PHOTO_MAX) return file;
+    throw Error('PNG 또는 JPEG 사진을 선택해 주세요.');
+  }
+  const [w, h] = [img.width, img.height];
+  try {
+    if (ok && file.size <= 800*1024 && Math.max(w, h) <= 1600) return file;
+    let blob;
+    for (const max of [1600, 1280]) {
+      const [cw, ch] = fitSize(w, h, max), canvas = document.createElement('canvas');
+      canvas.width = cw; canvas.height = ch;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; // 투명한 PNG는 JPEG로 바꾸면 검게 되므로 흰 배경을 깝니다.
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.drawImage(img, 0, 0, cw, ch);
+      for (const q of [0.82, 0.7, 0.6]) {
+        blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', q));
+        if (!blob) throw Error('사진을 줄이지 못했습니다. 다른 사진을 선택해 주세요.');
+        if (blob.size <= 1.5*1024*1024) return blob;
+      }
+    }
+    if (blob.size > PHOTO_MAX) throw Error('사진은 2MB 이하로 선택해 주세요.');
+    return blob;
+  } finally { img.close?.(); }
+}
+
 async function api(path, data) {
   const r = await fetch(path, data ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)} : {});
   const body = await r.json();
@@ -355,7 +401,7 @@ function roundPanel(l, panel) {
     <p class="sub">기록 마감 ${dateTime(rnd.close)}${started ? (open ? '' : ' · 마감됨') : ' · 시작 전'}${tip('deadline')}</p>
     ${s.mismatch ? `<p class="notice"><strong>확인이 필요해요. WOD 방식이 서로 달라서 점수를 잠시 보류했어요.</strong>${tip('mismatch')}<br>${Object.entries(s.counts).map(([t, n]) => `${typeNames[t]} ${n}명`).join(' · ')}<br>방식이 하나로 맞춰지면 바로 다시 계산돼요. 기록을 올린 분은 마감 뒤에도 본인 기록을 고칠 수 있어요.</p>` : ''}
     <section><h2>WOD</h2><p class="guide">${e(rnd.guide.text) || '<span class="sub">아직 WOD가 올라오지 않았어요.</span>'}</p>${rnd.guide.photo ? `<img class="photo" src="/photo/${e(rnd.guide.photo)}" alt="WOD 사진">` : ''}
-      ${started ? `<details><summary>WOD 편집</summary><form id="guide"><label>WOD 내용<textarea name="text" maxlength="4000">${e(rnd.guide.text)}</textarea></label><label>사진 (PNG/JPEG, 2MB 이하)<input name="photo" type="file" accept="image/png,image/jpeg"></label>${rnd.guide.photo ? '<label><input name="remove" type="checkbox">기존 사진 삭제</label>' : ''}<button class="secondary">WOD 저장</button></form></details>` : ''}</section>
+      ${started ? `<details><summary>WOD 편집</summary><form id="guide"><label>WOD 내용<textarea name="text" maxlength="4000">${e(rnd.guide.text)}</textarea></label><label>사진 (PNG/JPEG, 올릴 때 자동으로 줄여요)<input name="photo" type="file" accept="image/png,image/jpeg"></label>${rnd.guide.photo ? '<label><input name="remove" type="checkbox">기존 사진 삭제</label>' : ''}<button class="secondary">WOD 저장</button></form></details>` : ''}</section>
     ${!direct ? '' : l.kind === 'daily' && !own
       ? '<section><h2>내 기록</h2><p class="sub">출석을 누르면 기록을 적을 수 있어요. 출석만 해도 점수가 들어가요.</p><button data-attend>출석</button></section>'
       : `<section><h2>내 기록${own?.division === 'attendance' ? ' · 출석 완료' : ''}</h2><form id="record">${recordFields(l.kind === 'daily', own)}<button>${own?.type ? '기록 수정' : '기록 저장'}</button></form></section>`}
@@ -570,13 +616,8 @@ document.addEventListener('submit', async ev => {
       let photo = rnd.guide.photo;
       const file = f.elements.photo.files[0];
       if (file) {
-        if (file.size > 2*1024*1024) throw Error('사진은 2MB 이하로 선택해 주세요.');
-        photo = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(Error('사진을 읽지 못했습니다. 다시 선택해 주세요.'));
-          reader.readAsDataURL(file);
-        });
+        notify('사진을 줄이고 있어요');
+        photo = await readDataUrl(await shrinkPhoto(file), '사진을 읽지 못했습니다. 다시 선택해 주세요.');
       }
       if (f.elements.remove?.checked) photo = '';
       Object.assign(data, {action:'guide', text:f.elements.text.value, photo, version:rnd.guideVersion});
