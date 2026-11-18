@@ -133,10 +133,10 @@ const contact = () => `<p class="sub">쓰다가 불편한 점이나 바라는 �
   <div class="row"><a class="button" href="mailto:${CONTACT}?subject=${encodeURIComponent('[와끼리] 문의·건의')}&amp;body=${encodeURIComponent('어떤 화면에서, 무엇을 하다가, 어떤 일이 있었는지 적어 주세요.')}">메일 보내기</a><button type="button" class="secondary" data-copy-mail>메일 주소 복사</button></div>`;
 const waiting = (q, u) => (q.status === 'author' && q.target === u) || (q.status === 'judge' && q.judge === u);
 
-function notify(t) {
+function notify(t, keep) {
   clearTimeout(timer);
   $('#message').textContent = t;
-  timer = setTimeout(() => $('#message').textContent = '', 5000);
+  if (!keep) timer = setTimeout(() => $('#message').textContent = '', 5000);
 }
 
 // 사진은 올리기 전에 브라우저에서 줄입니다. 서버(2MB, PNG·JPEG 확인)가 최종 검증입니다.
@@ -615,11 +615,12 @@ document.addEventListener('submit', async ev => {
       // 사진을 바꾸지 않으면 지금 사진의 id를 그대로 보냅니다.
       let photo = rnd.guide.photo;
       const file = f.elements.photo.files[0];
-      if (file) {
-        notify('사진을 줄이고 있어요');
+      // 삭제를 고르면 새 사진은 줄이지도 읽지도 않습니다(서버도 삭제가 우선입니다).
+      if (f.elements.remove?.checked) photo = '';
+      else if (file) {
+        notify('사진을 줄이고 있어요', true); // 끝나면 저장 결과 문구가 대신합니다.
         photo = await readDataUrl(await shrinkPhoto(file), '사진을 읽지 못했습니다. 다시 선택해 주세요.');
       }
-      if (f.elements.remove?.checked) photo = '';
       Object.assign(data, {action:'guide', text:f.elements.text.value, photo, version:rnd.guideVersion});
     }
     else if (f.id === 'request') Object.assign(data, {action:'request', target:f.elements.target.value, proposal:f.elements.invalidate.value === 'yes' ? null : readRecord(f), judge:f.elements.judge.value, reason:f.elements.reason.value});

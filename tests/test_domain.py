@@ -319,10 +319,12 @@ class KoreanClock(unittest.TestCase):
         cases = [(1796137199, True), (1796137200, False), (1796137200 + 1800, False),
                  (1796137200 + 9*3600 - 1, False), (1796137200 + 9*3600, False)]
         old_tz = os.environ.get('TZ')
-        zones = ['Asia/Seoul', 'UTC'] + (['America/Chicago'] if hasattr(time, 'tzset') else [])
+        # tzset이 없는 플랫폼은 시간대를 바꾸지 않고 지금 시간대로 한 번만 확인합니다.
+        zones = ['Asia/Seoul', 'UTC', 'America/Chicago'] if hasattr(time, 'tzset') else [None]
         try:
             for zone in zones:
-                os.environ['TZ'] = zone
+                if zone:
+                    os.environ['TZ'] = zone
                 if hasattr(time, 'tzset'):
                     time.tzset()
                 for now, open_ in cases:
