@@ -28,7 +28,7 @@ PHOTO_TOTAL = 50 * 1024 * 1024
 LIMITED = {'/api/signup': 'signup', '/api/login': 'enter', '/api/recover': 'enter', '/api/recovery-key': 'enter'}
 # shortcut: 요청 시각을 메모리에만 두어 재시작하면 초기화됩니다. 서버 프로세스를 둘 이상으로 늘리면 공유 저장소로 옮깁니다.
 hits, swept = {}, [0.0]
-FILES = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/logo.png': ('logo.png', 'image/png'), '/qrcode.js': ('qrcode.js', 'text/javascript; charset=utf-8'), '/holidays.json': ('holidays.json', 'application/json')}
+FILES = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/logo.png': ('logo.png', 'image/png'), '/qrcode.js': ('qrcode.js', 'text/javascript; charset=utf-8'), '/holidays.json': ('holidays.json', 'application/json'), '/about': ('about.html', 'text/html; charset=utf-8')}
 
 
 def fresh():
@@ -122,6 +122,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(raw)))
         self.send_header('Cache-Control', cache)
         self.send_header('X-Content-Type-Options', 'nosniff')
+        # 검색에는 소개 페이지('/', '/about')만 남깁니다. API·사진·초대 링크(?join=)는 색인하지 않게 합니다.
+        if urlparse(self.path).path.startswith(('/api/', '/photo/')) or 'join' in parse_qs(urlparse(self.path).query):
+            self.send_header('X-Robots-Tag', 'noindex')
         self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'")
         if cookie:
             self.send_header('Set-Cookie', cookie)
@@ -174,6 +177,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(404, {'error': '사진을 찾을 수 없어요.'})
             # id마다 내용이 바뀌지 않으므로 본인 브라우저에만 하루 캐시합니다.
             return self.send(200, row[1], row[0], cache='private, max-age=86400')
+        if url.path == '/robots.txt':
+            return self.send(200, f'User-agent: *\nDisallow: /api/\nDisallow: /photo/\nSitemap: {self.origin()}/sitemap.xml\n'.encode(), 'text/plain; charset=utf-8')
+        if url.path == '/sitemap.xml':
+            urls = ''.join(f'<url><loc>{self.origin()}{p}</loc></url>' for p in ('/', '/about'))
+            return self.send(200, f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>'.encode(), 'application/xml; charset=utf-8')
         if url.path not in FILES:
             return self.send(404, {'error': '페이지를 찾을 수 없습니다.'})
         name, mime = FILES[url.path]

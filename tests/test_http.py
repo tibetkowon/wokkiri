@@ -148,6 +148,29 @@ class HTTPChecks(Server):
         # 헤더 로고는 42px로만 쓰므로 원본(약 800KB)이 다시 들어오지 않게 합니다.
         self.assertLess((web / 'logo.png').stat().st_size, 50000)
 
+    def test_public_pages_and_noindex(self):
+        def get(path):
+            con = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
+            con.request('GET', path)
+            res = con.getresponse()
+            out = res.status, res.getheader('X-Robots-Tag'), res.read().decode()
+            con.close()
+            return out
+        for path in ('/', '/about'):
+            status, robots, body = get(path)
+            self.assertEqual((status, robots), (200, None), path)
+            for text in ('<html lang="ko">', '<title>와끼리 – 크로스핏 WOD 기록·리그</title>', '<meta name="description"', '크로스핏 박스 회원들이 WOD 기록을 올리고'):
+                self.assertIn(text, body, path)
+        origin = f'http://127.0.0.1:{self.server.server_port}'
+        self.assertIn(f'Sitemap: {origin}/sitemap.xml', get('/robots.txt')[2])
+        self.assertEqual(get('/robots.txt')[1], None)
+        status, robots, body = get('/sitemap.xml')
+        self.assertEqual((status, robots), (200, None))
+        self.assertIn(f'<loc>{origin}/about</loc>', body)
+        self.assertNotIn('join', body)
+        for path in ('/api/state', '/api/invite?t=nope', '/?join=abc'):
+            self.assertEqual(get(path)[1], 'noindex', path)
+
     def test_invite_join_and_hidden_leagues(self):
         _, ga, _ = self.login('garam', '1111')
         start = (datetime.fromtimestamp(self.now, KST).date() + timedelta(days=2)).isoformat()
