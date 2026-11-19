@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+# 프로젝트 설정을 무시하는 Codex 버전에서도 이 실행에만 스킬 목록을 적용합니다.
+skills_config=$(sed -n '/^config = \[/,/^\]/p' .codex/config.toml)
+exec codex -c "skills.$skills_config" "$@"
